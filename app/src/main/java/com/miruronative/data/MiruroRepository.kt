@@ -3,6 +3,7 @@ package com.miruronative.data
 import com.miruronative.data.model.AiringSchedule
 import com.miruronative.data.model.Category
 import com.miruronative.data.model.EpisodesResult
+import com.miruronative.data.model.DiscoverFilters
 import com.miruronative.data.model.Media
 import com.miruronative.data.model.MediaPage
 import com.miruronative.data.model.SourcesResult
@@ -42,6 +43,8 @@ class MiruroRepository(
     }
 
     suspend fun search(query: String, page: Int = 1): MediaPage = aniList.search(query, page)
+    suspend fun discover(filters: DiscoverFilters, page: Int = 1): MediaPage = aniList.discover(filters, page)
+    suspend fun discoverOptions() = aniList.discoverOptions()
 
     // ---- authenticated (AniList login) ----
     suspend fun viewer() = aniList.viewer()

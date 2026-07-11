@@ -1,0 +1,42 @@
+*.iml
+.DS_Store
+
+# Android and Gradle output
+.gradle/
+.kotlin/
+build/
+app/build/
+captures/
+.externalNativeBuild/
+.cxx/
+local.properties
+
+# Android release material
+*.apk
+*.ap_
+*.aab
+*.jks
+*.keystore
+
+# Local/editor state
+.idea/
+.vscode/
+
+# Generated or discarded project artifacts
+graphify-out/
+tmp/
+worker/
+Anivexa-API-main/
+MiruroAPI-2.3.0/
+MiruroAPI-2.3.0.zip
+anilili-showcase.zip
+
+# Keep only the curated mobile screenshots in showcase.
+showcase/*
+!showcase/mobile-1080x2340/
+showcase/mobile-1080x2340/*
+!showcase/mobile-1080x2340/01-home.png
+!showcase/mobile-1080x2340/02-home-browse.png
+!showcase/mobile-1080x2340/03-search.png
+!showcase/mobile-1080x2340/06-anime-details.png
+!showcase/mobile-1080x2340/09-player.png

@@ -30,5 +30,6 @@ data class WatchlistEntry(
     val title: String,
     val cover: String?,
     val format: String? = null,
+    val averageScore: Int? = null,
     val addedAt: Long = 0,
 )

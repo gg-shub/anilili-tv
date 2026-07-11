@@ -6,6 +6,8 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.miruronative.data.AppGraph
+import com.miruronative.data.model.DiscoverFilters
+import com.miruronative.data.model.DiscoverOptions
 import com.miruronative.data.model.Media
 import com.miruronative.ui.UiState
 import kotlinx.coroutines.Job
@@ -14,45 +16,108 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
+data class CatalogChoice(val value: String, val label: String)
+
 class SearchViewModel : ViewModel() {
     private val repo = AppGraph.repository
 
-    var query by mutableStateOf("")
+    var filters by mutableStateOf(DiscoverFilters())
         private set
+
+    val query: String get() = filters.query
 
     private val _state = MutableStateFlow<UiState<List<Media>>>(UiState.Loading)
     val state = _state.asStateFlow()
-    private var discovery: List<Media> = emptyList()
+
+    private val _options = MutableStateFlow(DiscoverOptions(genres = DEFAULT_GENRES))
+    val options = _options.asStateFlow()
 
     private var searchJob: Job? = null
 
     init {
         viewModelScope.launch {
-            runCatching { repo.trending().items.take(18) }
-                .onSuccess { discovery = it; _state.value = UiState.Success(it) }
-                .onFailure { _state.value = UiState.Error(it.message ?: "Failed to load suggestions") }
+            runCatching { repo.discoverOptions() }
+                .onSuccess { loaded ->
+                    _options.value = loaded.copy(
+                        genres = (DEFAULT_GENRES + loaded.genres).distinct(),
+                    )
+                }
         }
+        submit(delayMs = 0)
     }
 
-    fun onQueryChange(newQuery: String) {
-        query = newQuery
+    fun onQueryChange(value: String) = update(filters.copy(query = value), 350)
+
+    fun toggleGenre(value: String) = update(
+        filters.copy(genres = filters.genres.toggle(value)),
+    )
+
+    fun toggleTag(value: String) = update(
+        filters.copy(tags = filters.tags.toggle(value)),
+    )
+
+    fun setYear(value: Int?) = update(filters.copy(year = value))
+    fun setStatus(value: String?) = update(filters.copy(status = value))
+    fun setFormat(value: String?) = update(filters.copy(format = value))
+    fun setMinimumScore(value: Int?) = update(filters.copy(minimumScore = value))
+    fun setSort(value: String) = update(filters.copy(sort = value))
+
+    fun clearFilters() = update(DiscoverFilters(query = filters.query))
+    fun clearAll() = update(DiscoverFilters())
+    fun retry() = submit(delayMs = 0)
+
+    private fun update(updated: DiscoverFilters, delayMs: Long = 120) {
+        filters = updated
+        submit(delayMs)
+    }
+
+    private fun submit(delayMs: Long) {
         searchJob?.cancel()
-        if (newQuery.isBlank()) {
-            _state.value = UiState.Success(discovery)
-            return
-        }
         searchJob = viewModelScope.launch {
-            delay(350) // debounce keystrokes
-            runSearch(newQuery)
+            if (delayMs > 0) delay(delayMs)
+            _state.value = UiState.Loading
+            runCatching { repo.discover(filters).items }
+                .onSuccess { _state.value = UiState.Success(it) }
+                .onFailure { _state.value = UiState.Error(it.message ?: "Could not load the catalog") }
         }
     }
 
-    private suspend fun runSearch(q: String) {
-        _state.value = UiState.Loading
-        try {
-            _state.value = UiState.Success(repo.search(q).items)
-        } catch (e: Exception) {
-            _state.value = UiState.Error(e.message ?: "Search failed")
-        }
+    companion object {
+        val DEFAULT_GENRES = listOf(
+            "Action", "Adventure", "Comedy", "Drama", "Fantasy", "Romance",
+            "Sci-Fi", "Slice of Life", "Sports", "Supernatural", "Mystery", "Thriller",
+        )
+
+        val SORTS = listOf(
+            CatalogChoice("TRENDING_DESC", "Trending"),
+            CatalogChoice("POPULARITY_DESC", "Most popular"),
+            CatalogChoice("SCORE_DESC", "Highest rated"),
+            CatalogChoice("START_DATE_DESC", "Newest"),
+            CatalogChoice("START_DATE", "Oldest"),
+            CatalogChoice("TITLE_ROMAJI", "A–Z"),
+        )
+
+        val STATUSES = listOf(
+            CatalogChoice("RELEASING", "Ongoing"),
+            CatalogChoice("FINISHED", "Completed"),
+            CatalogChoice("NOT_YET_RELEASED", "Upcoming"),
+            CatalogChoice("HIATUS", "On hiatus"),
+            CatalogChoice("CANCELLED", "Cancelled"),
+        )
+
+        val FORMATS = listOf(
+            CatalogChoice("TV", "TV"),
+            CatalogChoice("MOVIE", "Movie"),
+            CatalogChoice("TV_SHORT", "TV short"),
+            CatalogChoice("OVA", "OVA"),
+            CatalogChoice("ONA", "ONA"),
+            CatalogChoice("SPECIAL", "Special"),
+            CatalogChoice("MUSIC", "Music"),
+        )
+
+        val RATINGS = listOf(60, 70, 80, 90)
     }
 }
+
+private fun Set<String>.toggle(value: String): Set<String> =
+    if (value in this) this - value else this + value

@@ -73,6 +73,43 @@ data class Media(
     val trailer: Trailer? = null,
 )
 
+/** Filters supported by AniList's Media catalog query. */
+data class DiscoverFilters(
+    val query: String = "",
+    val genres: Set<String> = emptySet(),
+    val tags: Set<String> = emptySet(),
+    val year: Int? = null,
+    val status: String? = null,
+    val format: String? = null,
+    val minimumScore: Int? = null,
+    val sort: String = "TRENDING_DESC",
+) {
+    val activeCount: Int
+        get() = genres.size + tags.size + listOf(year, status, format, minimumScore).count { it != null }
+}
+
+@Serializable
+data class MediaTag(
+    val name: String,
+    val description: String? = null,
+    val category: String? = null,
+    val isAdult: Boolean = false,
+)
+
+data class DiscoverOptions(
+    val genres: List<String> = emptyList(),
+    val tags: List<MediaTag> = emptyList(),
+)
+
+@Serializable
+data class DiscoverOptionsData(
+    @SerialName("GenreCollection") val genres: List<String> = emptyList(),
+    @SerialName("MediaTagCollection") val tags: List<MediaTag> = emptyList(),
+)
+
+@Serializable
+data class GqlDiscoverOptionsResponse(val data: DiscoverOptionsData? = null)
+
 // ---- Response envelopes ----
 @Serializable
 data class PageInfo(

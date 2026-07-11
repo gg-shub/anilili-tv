@@ -1,36 +1,45 @@
 package com.miruronative.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.miruronative.data.model.Media
+import com.miruronative.ui.adaptive.LocalAppDeviceProfile
 import com.miruronative.ui.adaptive.focusHighlight
 
-/** Poster card used across grids and horizontal rows. Fixed 2:3 poster + two text lines. */
+/** Dense poster card shared by Home, Browse, and AniList library rows. */
 @Composable
 fun AnimeCard(
     media: Media,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val device = LocalAppDeviceProfile.current
     Column(
         modifier = modifier
             .focusHighlight()
@@ -40,7 +49,7 @@ fun AnimeCard(
             Modifier
                 .fillMaxWidth()
                 .aspectRatio(2f / 3f)
-                .clip(RoundedCornerShape(10.dp))
+                .clip(RoundedCornerShape(8.dp))
                 .background(MaterialTheme.colorScheme.surfaceVariant),
         ) {
             AsyncImage(
@@ -50,32 +59,22 @@ fun AnimeCard(
                 contentScale = ContentScale.Crop,
             )
             media.averageScore?.let { score ->
-                Box(
-                    Modifier
-                        .align(Alignment.TopStart)
-                        .padding(6.dp)
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(MaterialTheme.colorScheme.primary)
-                        .padding(horizontal = 6.dp, vertical = 2.dp),
-                ) {
-                    Text(
-                        text = "$score%",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
+                RatingBadge(score, Modifier.align(Alignment.TopStart).padding(5.dp))
             }
         }
         Text(
             text = media.title.preferred,
-            style = MaterialTheme.typography.titleMedium,
-            maxLines = 2,
+            style = if (device.isTv) MaterialTheme.typography.titleMedium else MaterialTheme.typography.labelLarge,
+            maxLines = if (device.isTv) 2 else 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(top = 6.dp),
+            modifier = Modifier.padding(top = 5.dp),
         )
         Text(
-            text = listOfNotNull(media.format, media.seasonYear?.toString()).joinToString(" • "),
+            text = listOfNotNull(
+                media.format?.replace('_', ' '),
+                media.seasonYear?.toString(),
+                media.episodes?.let { "$it EP" },
+            ).joinToString("  ·  "),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
@@ -84,5 +83,30 @@ fun AnimeCard(
     }
 }
 
-/** Convenience content-padding for the app's grids. */
+/** Small, high-contrast score treatment shared by every media card presentation. */
+@Composable
+fun RatingBadge(score: Int, modifier: Modifier = Modifier) {
+    Row(
+        modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(Color.Black.copy(alpha = .78f))
+            .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = .6f), RoundedCornerShape(6.dp))
+            .padding(horizontal = 5.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            Icons.Default.Star,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(12.dp).padding(end = 2.dp),
+        )
+        Text(
+            "$score%",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color.White,
+            fontWeight = FontWeight.Bold,
+        )
+    }
+}
+
 val GridContentPadding = PaddingValues(16.dp)

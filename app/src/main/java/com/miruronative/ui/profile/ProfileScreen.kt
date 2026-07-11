@@ -1,6 +1,7 @@
 package com.miruronative.ui.profile
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
@@ -59,6 +60,8 @@ import com.miruronative.data.model.MediaListEntry
 import com.miruronative.data.settings.SettingsStore
 import com.miruronative.ui.UiState
 import com.miruronative.ui.components.SectionHeader
+import com.miruronative.ui.components.AnimeCard
+import com.miruronative.ui.components.RatingBadge
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
 import com.miruronative.ui.adaptive.focusHighlight
 
@@ -219,6 +222,7 @@ private fun AniListSection(
             .padding(device.pagePadding)
             .clip(RoundedCornerShape(14.dp))
             .background(MaterialTheme.colorScheme.surface)
+            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(14.dp))
             .padding(16.dp),
     ) {
         if (!loggedIn) {
@@ -284,24 +288,9 @@ private fun EntryRow(entries: List<MediaListEntry>, onAnimeClick: (Int) -> Unit)
         items(entries) { entry ->
             val media = entry.media ?: return@items
             Column(
-                Modifier
-                    .width(device.posterWidth)
-                    .focusHighlight()
-                    .clickable { onAnimeClick(media.id) },
+                Modifier.width(device.posterWidth),
             ) {
-                AsyncImage(
-                    model = media.coverImage.best,
-                    contentDescription = media.title.preferred,
-                    modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(10.dp)),
-                    contentScale = ContentScale.Crop,
-                )
-                Text(
-                    media.title.preferred,
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = 6.dp),
-                )
+                AnimeCard(media, onClick = { onAnimeClick(media.id) })
                 Text(
                     "EP ${entry.progress}/${media.episodes ?: "?"}",
                     style = MaterialTheme.typography.labelSmall,
@@ -351,13 +340,17 @@ private fun HistoryCard(entry: HistoryEntry, onResume: (HistoryEntry) -> Unit) {
 @Composable
 private fun WatchlistCard(entry: WatchlistEntry, onAnimeClick: (Int) -> Unit, modifier: Modifier = Modifier) {
     Column(modifier.focusHighlight().clickable { onAnimeClick(entry.anilistId) }) {
-        AsyncImage(
-            model = entry.cover,
-            contentDescription = entry.title,
-            modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(10.dp)),
-            contentScale = ContentScale.Crop,
-        )
+        Box(Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(8.dp))) {
+            AsyncImage(
+                model = entry.cover,
+                contentDescription = entry.title,
+                modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3f),
+                contentScale = ContentScale.Crop,
+            )
+            entry.averageScore?.let { RatingBadge(it, Modifier.align(Alignment.TopStart).padding(5.dp)) }
+        }
         Text(entry.title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 6.dp))
+        Text(entry.format.orEmpty().replace('_', ' '), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

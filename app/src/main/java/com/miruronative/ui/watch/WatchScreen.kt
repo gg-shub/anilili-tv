@@ -6,6 +6,7 @@ import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -234,7 +235,15 @@ private fun WatchContent(
         }
         LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
             item {
-                Column(Modifier.padding(device.pagePadding)) {
+                Column(
+                    Modifier
+                        .padding(device.pagePadding)
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.surface)
+                        .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))
+                        .padding(14.dp),
+                ) {
                     Text(
                         text = "Episode ${data.current.displayNumber}" +
                             (data.current.title?.let { ": $it" } ?: ""),
@@ -324,6 +333,11 @@ private fun EpisodeChip(
             .height(44.dp)
             .clip(RoundedCornerShape(8.dp))
             .background(background)
+            .border(
+                1.dp,
+                if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                RoundedCornerShape(8.dp),
+            )
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {

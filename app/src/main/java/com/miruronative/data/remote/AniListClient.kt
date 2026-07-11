@@ -2,11 +2,14 @@ package com.miruronative.data.remote
 
 import com.miruronative.data.auth.AuthManager
 import com.miruronative.data.model.GqlMediaListResponse
+import com.miruronative.data.model.GqlDiscoverOptionsResponse
 import com.miruronative.data.model.GqlMediaResponse
 import com.miruronative.data.model.GqlPageResponse
 import com.miruronative.data.model.GqlViewerResponse
 import com.miruronative.data.model.GraphQLRequest
 import com.miruronative.data.model.Media
+import com.miruronative.data.model.DiscoverFilters
+import com.miruronative.data.model.DiscoverOptions
 import com.miruronative.data.model.MediaListCollection
 import com.miruronative.data.model.MediaPage
 import com.miruronative.data.model.Viewer
@@ -15,6 +18,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -101,6 +106,68 @@ class AniListClient(
             put("perPage", perPage)
         }
         return queryPage(gql, vars, page)
+    }
+
+    /** Server-side catalog search used by Browse: every selected filter is applied by AniList. */
+    suspend fun discover(filters: DiscoverFilters, page: Int = 1, perPage: Int = 30): MediaPage {
+        val gql = """
+            query (
+              ${'$'}search: String,
+              ${'$'}page: Int,
+              ${'$'}perPage: Int,
+              ${'$'}genres: [String],
+              ${'$'}tags: [String],
+              ${'$'}year: Int,
+              ${'$'}status: MediaStatus,
+              ${'$'}format: MediaFormat,
+              ${'$'}minimumScore: Int,
+              ${'$'}sort: [MediaSort]
+            ) {
+              Page(page: ${'$'}page, perPage: ${'$'}perPage) {
+                pageInfo { hasNextPage currentPage }
+                media(
+                  search: ${'$'}search,
+                  type: ANIME,
+                  genre_in: ${'$'}genres,
+                  tag_in: ${'$'}tags,
+                  seasonYear: ${'$'}year,
+                  status: ${'$'}status,
+                  format: ${'$'}format,
+                  averageScore_greater: ${'$'}minimumScore,
+                  sort: ${'$'}sort
+                ) { $mediaListFields }
+              }
+            }
+        """.trimIndent()
+        val vars = buildJsonObject {
+            filters.query.trim().takeIf { it.isNotEmpty() }?.let { put("search", it) }
+            put("page", page)
+            put("perPage", perPage)
+            if (filters.genres.isNotEmpty()) put("genres", buildJsonArray { filters.genres.forEach(::add) })
+            if (filters.tags.isNotEmpty()) put("tags", buildJsonArray { filters.tags.forEach(::add) })
+            filters.year?.let { put("year", it) }
+            filters.status?.let { put("status", it) }
+            filters.format?.let { put("format", it) }
+            filters.minimumScore?.let { put("minimumScore", it) }
+            put("sort", buildJsonArray { add(filters.sort) })
+        }
+        return queryPage(gql, vars, page)
+    }
+
+    /** AniList-owned genre and tag catalog; adult tags are intentionally excluded in the app UI. */
+    suspend fun discoverOptions(): DiscoverOptions = withContext(Dispatchers.IO) {
+        val gql = """
+            query {
+              GenreCollection
+              MediaTagCollection { name description category isAdult }
+            }
+        """.trimIndent()
+        val text = post(gql, buildJsonObject { })
+        val data = json.decodeFromString(GqlDiscoverOptionsResponse.serializer(), text).data
+        DiscoverOptions(
+            genres = data?.genres.orEmpty().sorted(),
+            tags = data?.tags.orEmpty().filterNot { it.isAdult }.sortedBy { it.name },
+        )
     }
 
     /** Generic collection fetch (trending, popular, etc.). [status] is an optional MediaStatus enum. */

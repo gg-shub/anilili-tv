@@ -1,6 +1,7 @@
 package com.miruronative.ui.detail
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -97,7 +98,13 @@ fun DetailScreen(
                         IconButton(
                             onClick = {
                                 LibraryStore.toggleWatchlist(
-                                    WatchlistEntry(info.id, info.title.preferred, info.coverImage.best, info.format),
+                                    WatchlistEntry(
+                                        info.id,
+                                        info.title.preferred,
+                                        info.coverImage.best,
+                                        info.format,
+                                        info.averageScore,
+                                    ),
                                 )
                             },
                             modifier = Modifier.focusHighlight(RoundedCornerShape(24.dp)),
@@ -300,7 +307,8 @@ private fun Header(info: Media) {
                 modifier = Modifier
                     .width(coverWidth)
                     .aspectRatio(2f / 3f)
-                    .clip(RoundedCornerShape(10.dp)),
+                    .clip(RoundedCornerShape(10.dp))
+                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp)),
                 contentScale = ContentScale.Crop,
             )
             Column(Modifier.padding(start = 12.dp)) {
@@ -325,16 +333,28 @@ private fun Header(info: Media) {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun GenreRow(genres: List<String>) {
     if (genres.isEmpty()) return
     val device = LocalAppDeviceProfile.current
-    Text(
-        text = genres.joinToString(" • "),
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    FlowRow(
         modifier = Modifier.padding(horizontal = device.pagePadding),
-    )
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        genres.forEach { genre ->
+            Box(
+                Modifier
+                    .padding(bottom = 6.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(6.dp))
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+            ) {
+                Text(genre, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
 }
 
 @Composable
@@ -350,9 +370,14 @@ private fun Description(description: String?) {
         maxLines = if (expanded) Int.MAX_VALUE else 4,
         overflow = TextOverflow.Ellipsis,
         modifier = Modifier
-            .padding(device.pagePadding)
+            .padding(horizontal = device.pagePadding, vertical = 8.dp)
+            .fillMaxWidth()
             .focusHighlight(RoundedCornerShape(8.dp))
-            .clickable { expanded = !expanded },
+            .clip(RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
+            .clickable { expanded = !expanded }
+            .padding(12.dp),
     )
 }
 
@@ -368,7 +393,15 @@ private fun SelectorSection(
     onSelectCategory: (Category) -> Unit,
 ) {
     val device = LocalAppDeviceProfile.current
-    Column(Modifier.padding(horizontal = device.pagePadding)) {
+    Column(
+        Modifier
+            .padding(horizontal = device.pagePadding, vertical = 8.dp)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))
+            .padding(12.dp),
+    ) {
         Text("Server", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp, bottom = 4.dp))
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             providers.forEach { name ->
@@ -419,6 +452,7 @@ private fun EpisodeChip(episode: EpisodeItem, onClick: () -> Unit, modifier: Mod
             .height(44.dp)
             .clip(RoundedCornerShape(8.dp))
             .background(bg)
+            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {

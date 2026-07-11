@@ -6,6 +6,7 @@ import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
@@ -55,6 +56,7 @@ import com.miruronative.data.reminder.ReminderManager
 import com.miruronative.ui.UiState
 import com.miruronative.ui.components.ErrorBox
 import com.miruronative.ui.components.LoadingBox
+import com.miruronative.ui.components.RatingBadge
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
 import com.miruronative.ui.adaptive.focusHighlight
 import java.time.Instant
@@ -212,18 +214,20 @@ private fun ScheduleRow(
             .focusHighlight(RoundedCornerShape(12.dp))
             .clip(RoundedCornerShape(10.dp))
             .background(MaterialTheme.colorScheme.surface)
+            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))
             .clickable { onAnimeClick(media.id) }
             .padding(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        AsyncImage(
-            model = media.coverImage.best,
-            contentDescription = media.title.preferred,
-            modifier = Modifier
-                .size(width = 54.dp, height = 74.dp)
-                .clip(RoundedCornerShape(8.dp)),
-            contentScale = ContentScale.Crop,
-        )
+        Box(Modifier.size(width = 54.dp, height = 74.dp).clip(RoundedCornerShape(8.dp))) {
+            AsyncImage(
+                model = media.coverImage.best,
+                contentDescription = media.title.preferred,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            )
+            media.averageScore?.let { RatingBadge(it, Modifier.align(Alignment.TopStart).padding(3.dp)) }
+        }
         Column(
             Modifier
                 .weight(1f)

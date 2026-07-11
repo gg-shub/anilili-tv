@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -59,6 +60,7 @@ import com.miruronative.data.model.Media
 import com.miruronative.ui.UiState
 import com.miruronative.ui.components.ErrorBox
 import com.miruronative.ui.components.LoadingBox
+import com.miruronative.ui.components.AnimeCard
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
 import com.miruronative.ui.adaptive.focusHighlight
 
@@ -106,6 +108,8 @@ fun HomeScreen(
             is UiState.Error -> ErrorBox(s.message, vm::load, Modifier.padding(padding))
             is UiState.Success -> HomeContent(
                 data = s.data,
+                selectedTab = vm.selectedTab,
+                onSelectTab = vm::selectTab,
                 history = history,
                 onAnimeClick = onAnimeClick,
                 onWatchNow = onWatchNow,
@@ -119,25 +123,79 @@ fun HomeScreen(
 @Composable
 private fun HomeContent(
     data: HomeData,
+    selectedTab: HomeTab,
+    onSelectTab: (HomeTab) -> Unit,
     history: List<HistoryEntry>,
     onAnimeClick: (Int) -> Unit,
     onWatchNow: (Int) -> Unit,
     onResume: (HistoryEntry) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val device = LocalAppDeviceProfile.current
+    val columns = when {
+        device.isTv -> 7
+        device.isExpanded -> 6
+        device.isTablet -> 4
+        else -> 3
+    }
+    val catalog = data.tab(selectedTab).take(if (device.isTv) 28 else 18)
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(bottom = 28.dp),
-        verticalArrangement = Arrangement.spacedBy(18.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         item { HeroPager(data.spotlight.take(6), onAnimeClick, onWatchNow) }
         if (history.isNotEmpty()) {
             item { ContinueRail(history.take(12), onResume) }
         }
-        item { MediaRail("Trending Now", data.spotlight, onAnimeClick) }
-        item { MediaRail("New Episodes", data.newest, onAnimeClick) }
-        item { MediaRail("Popular This Season", data.popular, onAnimeClick) }
-        item { MediaRail("Critically Acclaimed", data.topRated, onAnimeClick) }
+        item { HomeCatalogTabs(selectedTab, onSelectTab) }
+        items(catalog.chunked(columns)) { row ->
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = device.pagePadding),
+                horizontalArrangement = Arrangement.spacedBy(if (device.isTv) 16.dp else 9.dp),
+            ) {
+                row.forEach { media ->
+                    AnimeCard(media, { onAnimeClick(media.id) }, Modifier.weight(1f))
+                }
+                repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
+            }
+        }
+        item { MediaRail("Trending this week", data.spotlight, onAnimeClick) }
+    }
+}
+
+@Composable
+private fun HomeCatalogTabs(selected: HomeTab, onSelect: (HomeTab) -> Unit) {
+    val device = LocalAppDeviceProfile.current
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = device.pagePadding)
+            .clip(RoundedCornerShape(9.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .padding(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        HomeTab.entries.forEach { tab ->
+            val active = tab == selected
+            Box(
+                Modifier
+                    .weight(1f)
+                    .focusHighlight(RoundedCornerShape(7.dp))
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(if (active) MaterialTheme.colorScheme.primary.copy(alpha = .24f) else Color.Transparent)
+                    .clickable { onSelect(tab) }
+                    .padding(vertical = 9.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    tab.label,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
     }
 }
 
@@ -148,9 +206,9 @@ private fun HeroPager(items: List<Media>, onAnimeClick: (Int) -> Unit, onWatchNo
     val pagerState = rememberPagerState(pageCount = { items.size })
     val heroHeight = when {
         device.isTv -> 420.dp
-        device.isExpanded -> 400.dp
-        device.isTablet -> 370.dp
-        else -> 340.dp
+        device.isExpanded -> 360.dp
+        device.isTablet -> 320.dp
+        else -> 270.dp
     }
     Box(
         Modifier
@@ -252,21 +310,11 @@ private fun MediaRail(title: String, media: List<Media>, onAnimeClick: (Int) -> 
             horizontalArrangement = Arrangement.spacedBy(if (device.isTv) 18.dp else 10.dp),
         ) {
             items(media, key = { it.id }) { item ->
-                Column(
-                    Modifier
-                        .width(device.posterWidth)
-                        .focusHighlight()
-                        .clickable { onAnimeClick(item.id) },
-                ) {
-                    AsyncImage(
-                        model = item.coverImage.best,
-                        contentDescription = item.title.preferred,
-                        modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(8.dp)),
-                        contentScale = ContentScale.Crop,
-                    )
-                    Text(item.title.preferred, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 6.dp))
-                    Text(item.format.orEmpty().replace('_', ' '), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
+                AnimeCard(
+                    media = item,
+                    onClick = { onAnimeClick(item.id) },
+                    modifier = Modifier.width(device.posterWidth),
+                )
             }
         }
     }
