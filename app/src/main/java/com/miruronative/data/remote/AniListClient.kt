@@ -236,6 +236,7 @@ class AniListClient(
                 name
                 avatar { large }
                 bannerImage
+                createdAt
                 statistics { anime { count episodesWatched minutesWatched meanScore } }
               }
             }
@@ -248,11 +249,11 @@ class AniListClient(
     suspend fun userAnimeList(userId: Int): MediaListCollection? = withContext(Dispatchers.IO) {
         val gql = """
             query (${'$'}userId: Int) {
-              MediaListCollection(userId: ${'$'}userId, type: ANIME, status_in: [CURRENT, PLANNING, PAUSED, COMPLETED]) {
+              MediaListCollection(userId: ${'$'}userId, type: ANIME, status_in: [CURRENT, REPEATING, PLANNING, PAUSED, COMPLETED, DROPPED]) {
                 lists {
                   name
                   status
-                  entries { id progress status media { $mediaListFields } }
+                  entries { id progress score(format: POINT_10_DECIMAL) status media { $mediaListFields } }
                 }
               }
             }

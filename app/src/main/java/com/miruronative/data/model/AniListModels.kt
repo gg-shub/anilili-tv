@@ -176,6 +176,7 @@ data class Viewer(
     val name: String,
     val avatar: UserAvatar? = null,
     val bannerImage: String? = null,
+    val createdAt: Long? = null,
     val statistics: ViewerStatistics? = null,
 )
 
@@ -186,7 +187,13 @@ data class ViewerData(@SerialName("Viewer") val viewer: Viewer? = null)
 data class GqlViewerResponse(val data: ViewerData? = null)
 
 @Serializable
-data class MediaListEntry(val id: Int = 0, val progress: Int = 0, val status: String? = null, val media: Media? = null)
+data class MediaListEntry(
+    val id: Int = 0,
+    val progress: Int = 0,
+    val score: Double = 0.0,
+    val status: String? = null,
+    val media: Media? = null,
+)
 
 @Serializable
 data class MediaListGroup(val name: String? = null, val status: String? = null, val entries: List<MediaListEntry> = emptyList())
