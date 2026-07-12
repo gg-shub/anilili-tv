@@ -1,6 +1,7 @@
 package com.miruronative.data.model
 
 import com.miruronative.data.ProviderCatalog
+import kotlinx.serialization.Serializable
 
 enum class Category(val api: String) {
     SUB("sub"),
@@ -11,6 +12,7 @@ enum class Category(val api: String) {
     }
 }
 
+@Serializable
 data class EpisodeItem(
     /** Raw pipe id — passed straight back to the `sources` endpoint. */
     val pipeId: String,
@@ -22,6 +24,7 @@ data class EpisodeItem(
     val displayNumber: String get() = if (number % 1.0 == 0.0) number.toInt().toString() else number.toString()
 }
 
+@Serializable
 data class ProviderData(
     val name: String,
     val sub: List<EpisodeItem>,
@@ -36,6 +39,7 @@ data class ProviderData(
     }
 }
 
+@Serializable
 data class EpisodesResult(val providers: List<ProviderData>) {
     val providerNames: List<String> get() = providers.map { it.name }
     fun provider(name: String): ProviderData? = providers.firstOrNull { it.name == name }

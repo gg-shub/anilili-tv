@@ -52,6 +52,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.miruronative.data.ProviderCatalog
 import com.miruronative.data.model.EpisodeItem
+import com.miruronative.playback.PlaybackService
 import com.miruronative.ui.UiState
 import com.miruronative.ui.components.ErrorBox
 import com.miruronative.ui.components.LoadingBox
@@ -78,6 +79,10 @@ fun WatchScreen(
     val context = LocalContext.current
     val device = LocalAppDeviceProfile.current
     val activity = remember(context) { context.findActivity() }
+
+    LaunchedEffect(webFallback) {
+        if (webFallback) PlaybackService.stopActivePlayback()
+    }
 
     // Drive orientation + system bars from the fullscreen flag; restore on leave.
     DisposableEffect(fullscreen, device.isTv) {
@@ -195,12 +200,15 @@ private fun WatchContent(
             when {
                 stream == null -> NoSource(onWebFallback)
                 stream.isEmbed || ProviderCatalog.isEmbed(data.provider) ->
-                    EmbedWebView(
-                        url = stream.url,
-                        referer = stream.referer,
-                        modifier = Modifier.fillMaxSize(),
-                        onFullscreenChanged = onFullscreenChanged,
-                    )
+                    Box(Modifier.fillMaxSize()) {
+                        LaunchedEffect(stream.url) { PlaybackService.stopActivePlayback() }
+                        EmbedWebView(
+                            url = stream.url,
+                            referer = stream.referer,
+                            modifier = Modifier.fillMaxSize(),
+                            onFullscreenChanged = onFullscreenChanged,
+                        )
+                    }
                 else -> PlayerSurface(
                     stream = stream,
                     subtitles = data.sources.subtitles,
@@ -209,6 +217,10 @@ private fun WatchContent(
                     episodeTitle = "Episode ${data.current.displayNumber}" +
                         (data.current.title?.let { ": $it" } ?: ""),
                     artworkUrl = data.artworkUrl,
+                    animeId = data.anilistId,
+                    provider = data.provider,
+                    category = data.category.api,
+                    episode = data.current.displayNumber,
                     onEnded = { if (com.miruronative.data.settings.SettingsStore.autoplay.value) onNext() },
                     onError = onPlaybackError,
                     modifier = Modifier.fillMaxSize(),

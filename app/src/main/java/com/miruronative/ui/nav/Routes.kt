@@ -4,6 +4,7 @@ import android.net.Uri
 
 /** Central route table + typed builders so call sites don't hand-format paths. */
 object Routes {
+    const val EXTRA_ROUTE = "com.miruronative.extra.ROUTE"
     const val HOME = "home"
     const val SEARCH = "search"
     const val SCHEDULE = "schedule"

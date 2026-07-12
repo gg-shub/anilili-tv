@@ -12,7 +12,8 @@ import com.miruronative.data.model.SubtitleItem
 import java.net.URI
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
-import java.util.concurrent.ConcurrentHashMap
+import java.util.Collections
+import java.util.LinkedHashMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -38,8 +39,8 @@ class AnivexaClient(
 ) {
     private data class Candidate(val slug: String, val title: String)
 
-    private val mediaCache = ConcurrentHashMap<Int, Media>()
-    private val identityCache = ConcurrentHashMap<String, String>()
+    private val mediaCache = boundedMap<Int, Media>(100)
+    private val identityCache = boundedMap<String, String>(250)
 
     suspend fun getEpisodes(anilistId: Int): EpisodesResult = withContext(Dispatchers.IO) {
         val media = media(anilistId)
@@ -360,6 +361,13 @@ class AnivexaClient(
         identityCache[key] = chosen.slug
         return chosen.slug
     }
+
+    private fun <K, V> boundedMap(maxEntries: Int): MutableMap<K, V> = Collections.synchronizedMap(
+        object : LinkedHashMap<K, V>(maxEntries, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>?): Boolean =
+                size > maxEntries
+        },
+    )
 
     private fun candidateScore(media: Media, candidate: Candidate): Double {
         var score = titles(media).maxOfOrNull { NativeProviderParsers.titleScore(it, candidate.title) } ?: 0.0

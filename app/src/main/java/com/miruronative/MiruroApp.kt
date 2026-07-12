@@ -1,13 +1,17 @@
 package com.miruronative
 
 import android.app.Application
+import coil.ImageLoader
+import coil.ImageLoaderFactory
+import coil.disk.DiskCache
+import coil.memory.MemoryCache
 import com.miruronative.data.AppGraph
 import com.miruronative.data.auth.AuthManager
 import com.miruronative.data.library.LibraryStore
 import com.miruronative.data.settings.SettingsStore
 import com.miruronative.data.reminder.ReminderManager
 
-class MiruroApp : Application() {
+class MiruroApp : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
         AppGraph.init(this)
@@ -16,4 +20,19 @@ class MiruroApp : Application() {
         SettingsStore.init(this)
         ReminderManager.init(this)
     }
+
+    override fun newImageLoader(): ImageLoader = ImageLoader.Builder(this)
+        .memoryCache {
+            MemoryCache.Builder(this)
+                .maxSizePercent(0.25)
+                .build()
+        }
+        .diskCache {
+            DiskCache.Builder()
+                .directory(cacheDir.resolve("images"))
+                .maxSizeBytes(256L * 1024 * 1024)
+                .build()
+        }
+        .crossfade(true)
+        .build()
 }

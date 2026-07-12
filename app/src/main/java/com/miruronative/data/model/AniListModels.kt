@@ -96,6 +96,7 @@ data class MediaTag(
     val isAdult: Boolean = false,
 )
 
+@Serializable
 data class DiscoverOptions(
     val genres: List<String> = emptyList(),
     val tags: List<MediaTag> = emptyList(),
@@ -208,4 +209,5 @@ data class MediaListCollectionData(@SerialName("MediaListCollection") val collec
 data class GqlMediaListResponse(val data: MediaListCollectionData? = null)
 
 /** A page of results plus whether more exist — used to drive infinite scroll. */
+@Serializable
 data class MediaPage(val items: List<Media>, val hasNextPage: Boolean, val page: Int)

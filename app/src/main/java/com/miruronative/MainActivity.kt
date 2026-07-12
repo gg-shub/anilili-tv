@@ -1,6 +1,7 @@
 package com.miruronative
 
 import android.app.PictureInPictureParams
+import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Rect
@@ -69,6 +70,7 @@ import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private var inPictureInPicture by mutableStateOf(false)
+    private var pendingRoute by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge(
@@ -76,13 +78,18 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
         )
         super.onCreate(savedInstanceState)
+        pendingRoute = intent.getStringExtra(Routes.EXTRA_ROUTE)
         setContent {
             MiruroTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
                 ) {
-                    MiruroRoot(inPictureInPicture)
+                    MiruroRoot(
+                        inPictureInPicture = inPictureInPicture,
+                        pendingRoute = pendingRoute,
+                        onRouteConsumed = { pendingRoute = null },
+                    )
                 }
             }
         }
@@ -105,6 +112,12 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        pendingRoute = intent.getStringExtra(Routes.EXTRA_ROUTE)
     }
 
     override fun onUserLeaveHint() {
@@ -139,12 +152,23 @@ private enum class Tab(val route: String, val label: String, val icon: ImageVect
 }
 
 @Composable
-private fun MiruroRoot(inPictureInPicture: Boolean) {
+private fun MiruroRoot(
+    inPictureInPicture: Boolean,
+    pendingRoute: String?,
+    onRouteConsumed: () -> Unit,
+) {
     val deviceProfile = rememberAppDeviceProfile()
     val nav = rememberNavController()
     val backStack by nav.currentBackStackEntryAsState()
     val currentRoute = backStack?.destination?.route
     val showBottomBar = currentRoute in Routes.tabRoutes
+
+    LaunchedEffect(pendingRoute) {
+        pendingRoute?.takeIf { it.isNotBlank() }?.let { route ->
+            nav.navigate(route) { launchSingleTop = true }
+            onRouteConsumed()
+        }
+    }
 
     CompositionLocalProvider(LocalAppDeviceProfile provides deviceProfile) {
         Box(Modifier.fillMaxSize()) {

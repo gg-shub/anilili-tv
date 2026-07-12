@@ -2,6 +2,7 @@ package com.miruronative.ui.watch
 
 import android.content.ComponentName
 import android.net.Uri
+import android.os.Bundle
 import androidx.annotation.OptIn
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -38,6 +39,7 @@ import com.miruronative.data.model.StreamItem
 import com.miruronative.data.model.SubtitleItem
 import com.miruronative.playback.PlaybackService
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
+import com.miruronative.ui.nav.Routes
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
@@ -51,6 +53,10 @@ fun PlayerSurface(
     seriesTitle: String,
     episodeTitle: String,
     artworkUrl: String?,
+    animeId: Int,
+    provider: String,
+    category: String,
+    episode: String,
     onEnded: () -> Unit,
     onError: (String) -> Unit,
     modifier: Modifier = Modifier,
@@ -95,8 +101,6 @@ fun PlayerSurface(
                     activeController.duration.coerceAtLeast(0),
                 )
                 activeController.removeListener(listener)
-                activeController.stop()
-                activeController.clearMediaItems()
             }
         }
     }
@@ -106,10 +110,14 @@ fun PlayerSurface(
         if (activeController.currentMediaItem?.mediaId == stream.url) return@LaunchedEffect
 
         PlaybackService.configureRequestHeaders(stream.referer)
+        val watchRoute = Routes.watch(animeId, provider, category, episode)
         val metadata = MediaMetadata.Builder()
             .setTitle(episodeTitle)
             .setArtist(seriesTitle)
             .apply { artworkUrl?.let { setArtworkUri(Uri.parse(it)) } }
+            .setExtras(Bundle().apply {
+                putString(PlaybackService.EXTRA_WATCH_ROUTE, watchRoute)
+            })
             .build()
         val item = MediaItem.Builder()
             .setMediaId(stream.url)

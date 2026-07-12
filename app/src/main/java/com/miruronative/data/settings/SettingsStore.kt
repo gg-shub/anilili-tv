@@ -1,13 +1,27 @@
 package com.miruronative.data.settings
 
 import android.content.Context
-import android.content.SharedPreferences
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.preferencesDataStoreFile
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import java.io.IOException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 
-/** Small persistent preference store shared by playback and the Library settings UI. */
+/** Transactional DataStore preferences shared by playback and the Library settings UI. */
 object SettingsStore {
-    private lateinit var prefs: SharedPreferences
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private lateinit var store: DataStore<Preferences>
 
     private val _autoplay = MutableStateFlow(true)
     val autoplay = _autoplay.asStateFlow()
@@ -19,22 +33,51 @@ object SettingsStore {
     val preferDub = _preferDub.asStateFlow()
 
     fun init(context: Context) {
-        prefs = context.applicationContext.getSharedPreferences("anilili_settings", Context.MODE_PRIVATE)
-        _autoplay.value = prefs.getBoolean(KEY_AUTOPLAY, true)
-        _autoSyncAniList.value = prefs.getBoolean(KEY_AUTO_SYNC, true)
-        _preferDub.value = prefs.getBoolean(KEY_PREFER_DUB, false)
+        val app = context.applicationContext
+        store = PreferenceDataStoreFactory.create(
+            scope = scope,
+            produceFile = { app.preferencesDataStoreFile("anilili_settings") },
+        )
+        scope.launch {
+            migrateLegacyPreferences(app)
+            store.data
+                .catch { error ->
+                    if (error is IOException) emit(emptyPreferences()) else throw error
+                }
+                .collect(::applyPreferences)
+        }
     }
 
-    fun setAutoplay(value: Boolean) = save(KEY_AUTOPLAY, value, _autoplay)
-    fun setAutoSyncAniList(value: Boolean) = save(KEY_AUTO_SYNC, value, _autoSyncAniList)
-    fun setPreferDub(value: Boolean) = save(KEY_PREFER_DUB, value, _preferDub)
+    fun setAutoplay(value: Boolean) = save(AUTOPLAY, value, _autoplay)
+    fun setAutoSyncAniList(value: Boolean) = save(AUTO_SYNC, value, _autoSyncAniList)
+    fun setPreferDub(value: Boolean) = save(PREFER_DUB, value, _preferDub)
 
-    private fun save(key: String, value: Boolean, state: MutableStateFlow<Boolean>) {
+    private fun save(key: Preferences.Key<Boolean>, value: Boolean, state: MutableStateFlow<Boolean>) {
         state.value = value
-        prefs.edit().putBoolean(key, value).apply()
+        scope.launch { store.edit { it[key] = value } }
     }
 
-    private const val KEY_AUTOPLAY = "autoplay"
-    private const val KEY_AUTO_SYNC = "auto_sync_anilist"
-    private const val KEY_PREFER_DUB = "prefer_dub"
+    private fun applyPreferences(prefs: Preferences) {
+        _autoplay.value = prefs[AUTOPLAY] ?: true
+        _autoSyncAniList.value = prefs[AUTO_SYNC] ?: true
+        _preferDub.value = prefs[PREFER_DUB] ?: false
+    }
+
+    private suspend fun migrateLegacyPreferences(context: Context) {
+        val current = store.data.first()
+        if (current[MIGRATED] == true) return
+        val legacy = context.getSharedPreferences("anilili_settings", Context.MODE_PRIVATE)
+        store.edit { prefs ->
+            prefs[AUTOPLAY] = legacy.getBoolean("autoplay", true)
+            prefs[AUTO_SYNC] = legacy.getBoolean("auto_sync_anilist", true)
+            prefs[PREFER_DUB] = legacy.getBoolean("prefer_dub", false)
+            prefs[MIGRATED] = true
+        }
+        legacy.edit().clear().apply()
+    }
+
+    private val AUTOPLAY = booleanPreferencesKey("autoplay")
+    private val AUTO_SYNC = booleanPreferencesKey("auto_sync_anilist")
+    private val PREFER_DUB = booleanPreferencesKey("prefer_dub")
+    private val MIGRATED = booleanPreferencesKey("migrated_from_shared_preferences")
 }

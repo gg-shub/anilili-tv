@@ -7,13 +7,15 @@ import com.miruronative.data.model.DiscoverFilters
 import com.miruronative.data.model.Media
 import com.miruronative.data.model.MediaPage
 import com.miruronative.data.model.SourcesResult
+import com.miruronative.data.cache.AppCache
+import com.miruronative.data.model.DiscoverOptions
 import com.miruronative.data.remote.AniListClient
 import com.miruronative.data.remote.AnivexaClient
 import com.miruronative.data.remote.PipeClient
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.nullable
 
 /**
  * Single entry point the UI talks to. Combines AniList metadata with two streaming backends —
@@ -23,28 +25,51 @@ class MiruroRepository(
     private val aniList: AniListClient,
     private val pipe: PipeClient,
     private val anivexa: AnivexaClient,
+    private val cache: AppCache,
 ) {
     // ---- discovery (AniList) ----
-    suspend fun trending(page: Int = 1): MediaPage = aniList.collection("TRENDING_DESC", page = page, perPage = 30)
-    suspend fun popular(page: Int = 1): MediaPage = aniList.collection("POPULARITY_DESC", page = page, perPage = 30)
-    suspend fun topRated(page: Int = 1): MediaPage = aniList.collection("SCORE_DESC", page = page, perPage = 30)
+    suspend fun trending(page: Int = 1): MediaPage = mediaPage("trending:$page", COLLECTION_TTL) {
+        aniList.collection("TRENDING_DESC", page = page, perPage = 30)
+    }
+    suspend fun popular(page: Int = 1): MediaPage = mediaPage("popular:$page", COLLECTION_TTL) {
+        aniList.collection("POPULARITY_DESC", page = page, perPage = 30)
+    }
+    suspend fun topRated(page: Int = 1): MediaPage = mediaPage("top:$page", COLLECTION_TTL) {
+        aniList.collection("SCORE_DESC", page = page, perPage = 30)
+    }
     suspend fun recentlyReleased(page: Int = 1): MediaPage =
-        aniList.collection("START_DATE_DESC", status = "RELEASING", page = page, perPage = 30)
+        mediaPage("recent:$page", AIRING_TTL) {
+            aniList.collection("START_DATE_DESC", status = "RELEASING", page = page, perPage = 30)
+        }
 
     suspend fun airing(page: Int = 1): MediaPage =
-        aniList.collection("POPULARITY_DESC", status = "RELEASING", page = page, perPage = 40)
+        mediaPage("airing:$page", AIRING_TTL) {
+            aniList.collection("POPULARITY_DESC", status = "RELEASING", page = page, perPage = 40)
+        }
 
     suspend fun schedule(dayOffset: Int): List<AiringSchedule> {
         val zone = java.time.ZoneId.systemDefault()
         val day = java.time.LocalDate.now(zone).plusDays(dayOffset.toLong())
         val start = day.atStartOfDay(zone).toEpochSecond()
         val end = day.plusDays(1).atStartOfDay(zone).toEpochSecond() - 1
-        return aniList.airingSchedule(start, end)
+        return cache.getOrFetch(
+            key = "schedule:$day",
+            serializer = ListSerializer(AiringSchedule.serializer()),
+            ttlMs = SCHEDULE_TTL,
+        ) { aniList.airingSchedule(start, end) }
     }
 
-    suspend fun search(query: String, page: Int = 1): MediaPage = aniList.search(query, page)
-    suspend fun discover(filters: DiscoverFilters, page: Int = 1): MediaPage = aniList.discover(filters, page)
-    suspend fun discoverOptions() = aniList.discoverOptions()
+    suspend fun search(query: String, page: Int = 1): MediaPage =
+        mediaPage("search:${query.trim().lowercase()}:$page", SEARCH_TTL) { aniList.search(query, page) }
+
+    suspend fun discover(filters: DiscoverFilters, page: Int = 1): MediaPage =
+        mediaPage("discover:${filters.cacheKey()}:$page", COLLECTION_TTL) { aniList.discover(filters, page) }
+
+    suspend fun discoverOptions(): DiscoverOptions = cache.getOrFetch(
+        key = "discover-options",
+        serializer = DiscoverOptions.serializer(),
+        ttlMs = OPTIONS_TTL,
+    ) { aniList.discoverOptions() }
 
     // ---- authenticated (AniList login) ----
     suspend fun viewer() = aniList.viewer()
@@ -52,32 +77,26 @@ class MiruroRepository(
     suspend fun saveAniListProgress(mediaId: Int, progress: Int, completed: Boolean = false) =
         aniList.saveMediaListEntry(mediaId, if (completed) "COMPLETED" else "CURRENT", progress)
 
-    private val infoCache = HashMap<Int, Media>()
-    suspend fun animeInfo(id: Int): Media? {
-        infoCache[id]?.let { return it }
-        return aniList.animeInfo(id)?.also { infoCache[id] = it }
-    }
+    suspend fun animeInfo(id: Int): Media? = cache.getOrFetch(
+        key = "anime:$id",
+        serializer = Media.serializer().nullable,
+        ttlMs = INFO_TTL,
+    ) { aniList.animeInfo(id) }
 
     // ---- streaming (two backends, cached per source) ----
-    private val miruroCache = HashMap<Int, EpisodesResult>()
-    private val anivexaCache = HashMap<Int, EpisodesResult>()
-    private val mutex = Mutex()
-
     /** Fast source — the Miruro pipe. */
-    suspend fun miruroEpisodes(anilistId: Int): EpisodesResult {
-        mutex.withLock { miruroCache[anilistId] }?.let { return it }
-        val result = pipe.getEpisodes(anilistId)
-        mutex.withLock { miruroCache[anilistId] = result }
-        return result
-    }
+    suspend fun miruroEpisodes(anilistId: Int): EpisodesResult = cache.getOrFetch(
+        key = "episodes:miruro:$anilistId",
+        serializer = EpisodesResult.serializer(),
+        ttlMs = EPISODES_TTL,
+    ) { pipe.getEpisodes(anilistId) }
 
     /** Extra sources — Anivexa-API (can be slower; loaded in the background by the detail screen). */
-    suspend fun anivexaEpisodes(anilistId: Int): EpisodesResult {
-        mutex.withLock { anivexaCache[anilistId] }?.let { return it }
-        val result = anivexa.getEpisodes(anilistId)
-        mutex.withLock { anivexaCache[anilistId] = result }
-        return result
-    }
+    suspend fun anivexaEpisodes(anilistId: Int): EpisodesResult = cache.getOrFetch(
+        key = "episodes:anivexa:$anilistId",
+        serializer = EpisodesResult.serializer(),
+        ttlMs = EPISODES_TTL,
+    ) { anivexa.getEpisodes(anilistId) }
 
     /** Merged view of both sources — used where the full provider list is needed (watch screen). */
     suspend fun episodes(anilistId: Int): EpisodesResult = coroutineScope {
@@ -135,5 +154,39 @@ class MiruroRepository(
             }
         }
         return null
+    }
+
+    private suspend fun mediaPage(
+        key: String,
+        ttlMs: Long,
+        fetch: suspend () -> MediaPage,
+    ): MediaPage = cache.getOrFetch(
+        key = "media:$key",
+        serializer = MediaPage.serializer(),
+        ttlMs = ttlMs,
+        fetch = fetch,
+    )
+
+    private fun DiscoverFilters.cacheKey(): String = listOf(
+        query.trim().lowercase(),
+        genres.sorted().joinToString(","),
+        tags.sorted().joinToString(","),
+        year.orEmpty(),
+        status.orEmpty(),
+        format.orEmpty(),
+        minimumScore.orEmpty(),
+        sort,
+    ).joinToString("|")
+
+    private fun Any?.orEmpty(): String = this?.toString().orEmpty()
+
+    private companion object {
+        const val SCHEDULE_TTL = 15L * 60 * 1000
+        const val SEARCH_TTL = 30L * 60 * 1000
+        const val AIRING_TTL = 30L * 60 * 1000
+        const val COLLECTION_TTL = 4L * 60 * 60 * 1000
+        const val EPISODES_TTL = 2L * 60 * 60 * 1000
+        const val INFO_TTL = 24L * 60 * 60 * 1000
+        const val OPTIONS_TTL = 7L * 24 * 60 * 60 * 1000
     }
 }
