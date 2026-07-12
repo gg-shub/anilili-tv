@@ -163,6 +163,13 @@ fun SearchScreen(
                     modifier = Modifier.fillMaxWidth().focusGroup(),
                     horizontalArrangement = Arrangement.spacedBy(7.dp),
                 ) {
+                    item(key = "format-movie") {
+                        FilterChip(
+                            selected = vm.filters.format == "MOVIE",
+                            onClick = { vm.setFormat(if (vm.filters.format == "MOVIE") null else "MOVIE") },
+                            label = { Text("Movies") },
+                        )
+                    }
                     items(options.genres.take(14), key = { it }) { genre ->
                         FilterChip(
                             selected = genre in vm.filters.genres,

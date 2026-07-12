@@ -64,8 +64,8 @@ fun AnimeCard(
         }
         Text(
             text = media.title.preferred,
-            style = if (device.isTv) MaterialTheme.typography.titleMedium else MaterialTheme.typography.labelLarge,
-            maxLines = if (device.isTv) 2 else 1,
+            style = MaterialTheme.typography.labelLarge,
+            maxLines = if (device.isTv) 3 else 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(top = 5.dp),
         )

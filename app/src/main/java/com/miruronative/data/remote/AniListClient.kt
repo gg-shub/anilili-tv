@@ -43,6 +43,7 @@ class AniListClient(
 
     private val mediaListFields = """
         id
+        idMal
         title { romaji english native }
         coverImage { large extraLarge color }
         bannerImage

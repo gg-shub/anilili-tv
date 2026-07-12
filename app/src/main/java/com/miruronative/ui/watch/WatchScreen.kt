@@ -124,6 +124,7 @@ fun WatchScreen(
                 referer = "https://www.miruro.to/",
                 modifier = Modifier.fillMaxSize(),
                 onFullscreenChanged = { fullscreen = it },
+                onProgress = vm::onProgress,
             )
             BackButton(onBack, Modifier.align(Alignment.TopStart))
             return@Box
@@ -207,6 +208,7 @@ private fun WatchContent(
                             referer = stream.referer,
                             modifier = Modifier.fillMaxSize(),
                             onFullscreenChanged = onFullscreenChanged,
+                            onProgress = onProgress,
                         )
                     }
                 else -> PlayerSurface(

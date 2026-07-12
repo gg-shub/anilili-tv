@@ -224,7 +224,11 @@ private fun HeroPager(items: List<Media>, onAnimeClick: (Int) -> Unit, onWatchNo
             .height(heroHeight)
             .clip(if (device.isTv) RoundedCornerShape(18.dp) else RoundedCornerShape(0.dp)),
     ) {
-        HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier.fillMaxSize(),
+            userScrollEnabled = !device.isTv,
+        ) { page ->
             HeroCard(items[page], onAnimeClick, onWatchNow)
         }
         Row(

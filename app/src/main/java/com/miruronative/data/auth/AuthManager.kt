@@ -1,8 +1,10 @@
 package com.miruronative.data.auth
 
 import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
 import android.net.Uri
+import androidx.browser.customtabs.CustomTabsIntent
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import com.miruronative.data.reminder.ReleaseSyncScheduler
@@ -15,8 +17,15 @@ import com.miruronative.data.reminder.ReleaseSyncScheduler
 object AuthManager {
     const val CLIENT_ID = "45552"
     const val REDIRECT = "http://localhost"
-    const val AUTHORIZE_URL =
-        "https://anilist.co/api/v2/oauth/authorize?client_id=$CLIENT_ID&response_type=token"
+    val AUTHORIZE_URL: String = Uri.Builder()
+        .scheme("https")
+        .authority("anilist.co")
+        .path("/api/v2/oauth/authorize")
+        .appendQueryParameter("client_id", CLIENT_ID)
+        .appendQueryParameter("redirect_uri", REDIRECT)
+        .appendQueryParameter("response_type", "token")
+        .build()
+        .toString()
 
     private lateinit var prefs: SharedPreferences
     private lateinit var appContext: Context
@@ -43,6 +52,22 @@ object AuthManager {
         prefs.edit().remove("anilist_token").apply()
         _token.value = null
         ReleaseSyncScheduler.runNow(appContext)
+    }
+
+    fun openLogin(context: Context): Boolean {
+        val uri = Uri.parse(AUTHORIZE_URL)
+        return runCatching {
+            CustomTabsIntent.Builder()
+                .setShowTitle(true)
+                .build()
+                .launchUrl(context, uri)
+            true
+        }.getOrElse {
+            runCatching {
+                context.startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                true
+            }.getOrDefault(false)
+        }
     }
 
     /** True once a redirect URL carries the token; extract it with [extractToken]. */

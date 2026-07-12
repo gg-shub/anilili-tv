@@ -6,11 +6,18 @@ import com.miruronative.data.AppGraph
 import com.miruronative.data.auth.AuthManager
 import com.miruronative.data.model.MediaListEntry
 import com.miruronative.data.model.Viewer
+import com.miruronative.data.library.HistoryEntry
 import com.miruronative.data.library.LibraryStore
+import com.miruronative.data.library.MalExport
+import com.miruronative.data.library.MalExportEntry
+import com.miruronative.data.library.MalExportFile
+import com.miruronative.data.library.WatchlistEntry
 import com.miruronative.ui.UiState
 import com.miruronative.ui.rethrowIfCancellation
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 
 data class AniListProfile(
@@ -70,5 +77,73 @@ class ProfileViewModel : ViewModel() {
     fun logout() {
         AuthManager.logout()
         _profile.value = null
+    }
+
+    suspend fun buildMalExport(
+        profile: AniListProfile?,
+        watchlist: List<WatchlistEntry>,
+        history: List<HistoryEntry>,
+    ): MalExportFile = withContext(Dispatchers.IO) {
+        val entries = LinkedHashMap<Int, MalExportEntry>()
+        var skipped = 0
+
+        suspend fun addMediaList(entry: MediaListEntry) {
+            val media = entry.media ?: run {
+                skipped++
+                return
+            }
+            val resolved = if (media.idMal != null) media else repo.animeInfo(media.id) ?: media
+            val (status, rewatching) = MalExport.statusFromAniList(entry.status)
+            val exportEntry = MalExport.entryFromMedia(
+                media = resolved,
+                status = status,
+                progress = entry.progress,
+                score = entry.score,
+                rewatching = rewatching,
+            )
+            if (exportEntry == null) skipped++ else entries[resolved.id] = exportEntry
+        }
+
+        listOf(
+            profile?.watching.orEmpty(),
+            profile?.rewatching.orEmpty(),
+            profile?.completed.orEmpty(),
+            profile?.paused.orEmpty(),
+            profile?.dropped.orEmpty(),
+            profile?.planning.orEmpty(),
+        ).flatten().forEach { addMediaList(it) }
+
+        val historyById = history.associateBy { it.anilistId }
+        watchlist.forEach { saved ->
+            if (entries.containsKey(saved.anilistId)) return@forEach
+            val media = repo.animeInfo(saved.anilistId) ?: run {
+                skipped++
+                return@forEach
+            }
+            val progress = historyById[saved.anilistId]?.episodeNumber?.toInt() ?: 0
+            val exportEntry = MalExport.entryFromMedia(
+                media = media,
+                status = MalExport.statusFromLocal(progress, media.episodes),
+                progress = progress,
+            )
+            if (exportEntry == null) skipped++ else entries[saved.anilistId] = exportEntry
+        }
+
+        history.forEach { item ->
+            if (entries.containsKey(item.anilistId)) return@forEach
+            val media = repo.animeInfo(item.anilistId) ?: run {
+                skipped++
+                return@forEach
+            }
+            val progress = item.episodeNumber.toInt()
+            val exportEntry = MalExport.entryFromMedia(
+                media = media,
+                status = MalExport.statusFromLocal(progress, media.episodes),
+                progress = progress,
+            )
+            if (exportEntry == null) skipped++ else entries[item.anilistId] = exportEntry
+        }
+
+        MalExport.fromEntries(profile?.viewer?.name, entries.values.toList(), skipped)
     }
 }

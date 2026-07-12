@@ -43,7 +43,7 @@ data class AppDeviceProfile(
 
     val posterWidth: Dp
         get() = when {
-            isTv -> 168.dp
+            isTv -> 150.dp
             isExpanded -> 152.dp
             isTablet -> 140.dp
             else -> 128.dp
@@ -51,7 +51,7 @@ data class AppDeviceProfile(
 
     val gridMinWidth: Dp
         get() = when {
-            isTv -> 170.dp
+            isTv -> 145.dp
             isExpanded -> 150.dp
             isTablet -> 132.dp
             else -> 110.dp

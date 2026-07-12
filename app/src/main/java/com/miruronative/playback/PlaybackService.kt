@@ -142,6 +142,11 @@ class PlaybackService : MediaSessionService() {
             }
         }
 
+        /** Pause playback when the app is backgrounded while keeping the current media loaded. */
+        fun pauseActivePlayback() {
+            activePlayer?.pause()
+        }
+
         /** Applies per-provider headers before Media3 creates manifest and segment data sources. */
         fun configureRequestHeaders(referer: String?) {
             val safeReferer = referer ?: "https://www.miruro.to/"

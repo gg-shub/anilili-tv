@@ -6,6 +6,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.miruronative.data.AppGraph
+import com.miruronative.data.model.DiscoverFilters
 import com.miruronative.data.model.Media
 import com.miruronative.ui.UiState
 import com.miruronative.ui.rethrowIfCancellation
@@ -18,6 +19,7 @@ import kotlinx.coroutines.launch
 enum class HomeTab(val label: String) {
     NEWEST("NEWEST"),
     POPULAR("POPULAR"),
+    MOVIES("MOVIES"),
     TOP_RATED("TOP RATED"),
 }
 
@@ -25,11 +27,13 @@ data class HomeData(
     val spotlight: List<Media>,
     val newest: List<Media>,
     val popular: List<Media>,
+    val movies: List<Media>,
     val topRated: List<Media>,
 ) {
     fun tab(tab: HomeTab): List<Media> = when (tab) {
         HomeTab.NEWEST -> newest
         HomeTab.POPULAR -> popular
+        HomeTab.MOVIES -> movies
         HomeTab.TOP_RATED -> topRated
     }
 }
@@ -57,8 +61,11 @@ class HomeViewModel : ViewModel() {
                     val spotlight = async { repo.trending(force = force).items }
                     val newest = async { repo.recentlyReleased(force = force).items }
                     val popular = async { repo.popular(force = force).items }
+                    val movies = async {
+                        repo.discover(DiscoverFilters(format = "MOVIE", sort = "POPULARITY_DESC"), force = force).items
+                    }
                     val topRated = async { repo.topRated(force = force).items }
-                    HomeData(spotlight.await(), newest.await(), popular.await(), topRated.await())
+                    HomeData(spotlight.await(), newest.await(), popular.await(), movies.await(), topRated.await())
                 }
                 _state.value = UiState.Success(data)
             } catch (e: Exception) {

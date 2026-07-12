@@ -1,16 +1,13 @@
 package com.miruronative
 
 import android.Manifest
-import android.app.PictureInPictureParams
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Color
-import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
-import android.util.Rational
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -61,6 +58,8 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import androidx.core.content.ContextCompat
+import com.miruronative.data.auth.AuthManager
+import com.miruronative.data.library.LibraryStore
 import com.miruronative.data.reminder.AutomaticReleaseManager
 import com.miruronative.data.reminder.ReleaseSyncScheduler
 import com.miruronative.diagnostics.CrashReportDialog
@@ -79,6 +78,7 @@ import com.miruronative.ui.search.SearchScreen
 import com.miruronative.ui.theme.MiruroTheme
 import com.miruronative.ui.watch.WatchScreen
 import com.miruronative.playback.PlaybackStatus
+import com.miruronative.playback.PlaybackService
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -92,6 +92,7 @@ class MainActivity : ComponentActivity() {
         )
         super.onCreate(savedInstanceState)
         pendingRoute = intent.getStringExtra(Routes.EXTRA_ROUTE)
+        handleAuthRedirect(intent)
         setContent {
             MiruroTheme {
                 Surface(
@@ -120,18 +121,6 @@ class MainActivity : ComponentActivity() {
                 } else {
                     window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && supportsPictureInPicture()) {
-                    val root = window.decorView
-                    runCatching {
-                        setPictureInPictureParams(
-                            PictureInPictureParams.Builder()
-                                .setAspectRatio(Rational(16, 9))
-                                .setAutoEnterEnabled(playing)
-                                .setSourceRectHint(Rect(0, 0, root.width.coerceAtLeast(1), root.height.coerceAtLeast(1)))
-                                .build(),
-                        )
-                    }
-                }
             }
         }
     }
@@ -140,23 +129,23 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         pendingRoute = intent.getStringExtra(Routes.EXTRA_ROUTE)
+        handleAuthRedirect(intent)
     }
 
-    override fun onUserLeaveHint() {
-        super.onUserLeaveHint()
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S && supportsPictureInPicture() && PlaybackStatus.isPlaying.value) {
-            runCatching {
-                enterPictureInPictureMode(
-                    PictureInPictureParams.Builder()
-                        .setAspectRatio(Rational(16, 9))
-                        .build(),
-                )
-            }
+    private fun handleAuthRedirect(intent: Intent?) {
+        val url = intent?.dataString ?: return
+        if (!AuthManager.isRedirect(url)) return
+        AuthManager.extractToken(url)?.let { token ->
+            AuthManager.setToken(token)
+            LibraryStore.syncSavedToAniList()
+            pendingRoute = Routes.MORE
         }
     }
 
-    private fun supportsPictureInPicture(): Boolean = !isTelevision() &&
-        packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+    override fun onStop() {
+        super.onStop()
+        PlaybackService.pauseActivePlayback()
+    }
 
     override fun onPictureInPictureModeChanged(
         isInPictureInPictureMode: Boolean,
@@ -166,9 +155,6 @@ class MainActivity : ComponentActivity() {
         inPictureInPicture = isInPictureInPictureMode
     }
 
-    private fun isTelevision(): Boolean =
-        resources.configuration.uiMode and Configuration.UI_MODE_TYPE_MASK ==
-            Configuration.UI_MODE_TYPE_TELEVISION
 }
 
 private enum class Tab(val route: String, val label: String, val icon: ImageVector) {

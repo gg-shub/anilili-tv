@@ -53,6 +53,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -71,6 +72,7 @@ import coil.compose.AsyncImage
 import com.miruronative.data.auth.AuthManager
 import com.miruronative.data.library.HistoryEntry
 import com.miruronative.data.library.LibraryStore
+import com.miruronative.data.library.MalExportFile
 import com.miruronative.data.library.WatchlistEntry
 import com.miruronative.data.model.MediaListEntry
 import com.miruronative.data.reminder.AutomaticReleaseManager
@@ -82,6 +84,7 @@ import com.miruronative.ui.adaptive.focusHighlight
 import com.miruronative.ui.components.PullRefreshContainer
 import com.miruronative.ui.components.RatingBadge
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -150,10 +153,14 @@ fun ProfileScreen(
     val syncSavedToAniList by SettingsStore.syncSavedToAniList.collectAsState()
     val isRefreshing by vm.isRefreshing.collectAsState()
     var showLogin by remember { mutableStateOf(false) }
+    var pendingMalExport by remember { mutableStateOf<MalExportFile?>(null) }
+    var malExportBusy by remember { mutableStateOf(false) }
+    var malExportMessage by remember { mutableStateOf<String?>(null) }
     var selectedViewName by rememberSaveable { mutableStateOf(LibraryView.WATCHLIST.name) }
     var selectedFormat by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedAiring by rememberSaveable { mutableStateOf<String?>(null) }
     var titleFilter by rememberSaveable { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(token) {
         if (token == null) selectedViewName = LibraryView.WATCHLIST.name
@@ -194,6 +201,25 @@ fun ProfileScreen(
         SettingsStore.setReleaseNotifications(granted)
         if (granted) ReleaseSyncScheduler.runNow(context)
     }
+    val malExportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/xml"),
+    ) { uri ->
+        val file = pendingMalExport
+        pendingMalExport = null
+        if (uri == null || file == null) return@rememberLauncherForActivityResult
+        runCatching {
+            context.contentResolver.openOutputStream(uri)?.use { stream ->
+                stream.write(file.xml.toByteArray(Charsets.UTF_8))
+            } ?: error("Couldn't open export file")
+        }.onSuccess {
+            malExportMessage = buildString {
+                append("Exported ${file.exportedCount} anime")
+                if (file.skippedCount > 0) append("; skipped ${file.skippedCount} without MAL IDs")
+            }
+        }.onFailure { error ->
+            malExportMessage = error.message ?: "MAL export failed"
+        }
+    }
 
     fun setReleaseNotifications(enabled: Boolean) {
         if (!enabled) {
@@ -213,6 +239,27 @@ fun ProfileScreen(
     fun setSavedSync(enabled: Boolean) {
         SettingsStore.setSyncSavedToAniList(enabled)
         if (enabled) LibraryStore.syncSavedToAniList()
+    }
+
+    fun exportMal() {
+        if (malExportBusy) return
+        scope.launch {
+            malExportBusy = true
+            malExportMessage = null
+            runCatching { vm.buildMalExport(profile, watchlist, history) }
+                .onSuccess { file ->
+                    if (file.exportedCount == 0) {
+                        malExportMessage = "No MAL-mapped anime to export"
+                    } else {
+                        pendingMalExport = file
+                        malExportLauncher.launch(file.fileName)
+                    }
+                }
+                .onFailure { error ->
+                    malExportMessage = error.message ?: "MAL export failed"
+                }
+            malExportBusy = false
+        }
     }
 
     Scaffold(
@@ -238,7 +285,9 @@ fun ProfileScreen(
                 ProfileHero(
                     loggedIn = token != null,
                     state = profileState,
-                    onLogin = { showLogin = true },
+                    onLogin = {
+                        if (device.isTv || !AuthManager.openLogin(context)) showLogin = true
+                    },
                     onSync = { vm.loadIfLoggedIn() },
                     onLogout = vm::logout,
                 )
@@ -314,8 +363,11 @@ fun ProfileScreen(
                     autoSync = autoSync,
                     releaseNotifications = releaseNotifications,
                     syncSavedToAniList = syncSavedToAniList,
+                    malExportBusy = malExportBusy,
+                    malExportMessage = malExportMessage,
                     onReleaseNotificationsChange = ::setReleaseNotifications,
                     onSavedSyncChange = ::setSavedSync,
+                    onMalExport = ::exportMal,
                 )
             }
             }
@@ -627,8 +679,11 @@ private fun SettingsPanel(
     autoSync: Boolean,
     releaseNotifications: Boolean,
     syncSavedToAniList: Boolean,
+    malExportBusy: Boolean,
+    malExportMessage: String?,
     onReleaseNotificationsChange: (Boolean) -> Unit,
     onSavedSyncChange: (Boolean) -> Unit,
+    onMalExport: () -> Unit,
 ) {
     val device = LocalAppDeviceProfile.current
     Panel(Modifier.padding(horizontal = device.pagePadding, vertical = 8.dp)) {
@@ -650,6 +705,21 @@ private fun SettingsPanel(
                 onReleaseNotificationsChange,
             )
             HorizontalDivider(Modifier.padding(vertical = 4.dp), color = MaterialTheme.colorScheme.outline)
+            TextButton(
+                onClick = onMalExport,
+                enabled = !malExportBusy,
+                modifier = Modifier.padding(horizontal = 8.dp).focusHighlight(RoundedCornerShape(8.dp)),
+            ) {
+                Text(if (malExportBusy) "Preparing MyAnimeList export..." else "Export MyAnimeList XML")
+            }
+            malExportMessage?.let { message ->
+                Text(
+                    message,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp),
+                )
+            }
             TextButton(onClick = LibraryStore::clearHistory, modifier = Modifier.padding(horizontal = 8.dp).focusHighlight(RoundedCornerShape(8.dp))) {
                 Text("Clear viewing history")
             }

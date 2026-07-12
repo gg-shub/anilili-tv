@@ -38,6 +38,14 @@ class AnivexaClient(
     private val aniList: AniListClient,
 ) {
     private data class Candidate(val slug: String, val title: String)
+    private data class MegaPlayEmbed(val url: String, val referer: String, val skip: SkipTimes?)
+    private data class MegaPlayResult(
+        val embedUrl: String,
+        val origin: String,
+        val streams: List<StreamItem>,
+        val subtitles: List<SubtitleItem>,
+        val skip: SkipTimes?,
+    )
 
     private val mediaCache = boundedMap<Int, Media>(100)
     private val identityCache = boundedMap<String, String>(250)
@@ -95,21 +103,37 @@ class AnivexaClient(
 
     private fun anikoto(media: Media, audio: String, episode: Int): SourcesResult {
         val base = "https://megaplay.buzz"
-        val spoofReferer = "https://hianimes.re/"
-        var embedUrl = "$base/stream/ani/${media.id}/$episode/$audio"
-        var page = runCatching { getText(embedUrl, mapOf("Referer" to spoofReferer)) }.getOrDefault("")
+        val primary = MegaPlayEmbed("$base/stream/ani/${media.id}/$episode/$audio", "https://hianimes.re/", null)
+        val primaryResult = megaPlaySources(primary)
+        val result = if (primaryResult.streams.any { it.isHls }) {
+            primaryResult
+        } else {
+            runCatching { anikotoSiteEmbed(media, audio, episode)?.let(::megaPlaySources) }
+                .getOrNull()
+                ?.takeIf { it.streams.any(StreamItem::isHls) }
+                ?: primaryResult
+        }
+
+        val streams = result.streams.toMutableList()
+        streams += stream(result.embedUrl, "embed", "MegaPlay embed", "${result.origin}/", active = streams.isEmpty())
+        return SourcesResult(streams.distinctBy { it.url }, result.subtitles.distinctBy { it.url }, result.skip, null)
+    }
+
+    private fun megaPlaySources(embed: MegaPlayEmbed): MegaPlayResult {
+        var embedUrl = embed.url
+        var page = runCatching { getText(embedUrl, mapOf("Referer" to embed.referer)) }.getOrDefault("")
         val iframe = Regex("""<iframe\b[^>]*src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
             .find(page)?.groupValues?.get(1)
         if (page.data("id").isNullOrBlank() && !iframe.isNullOrBlank()) {
-            embedUrl = NativeProviderParsers.absoluteUrl(base, iframe)
-            page = runCatching { getText(embedUrl, mapOf("Referer" to spoofReferer)) }.getOrDefault(page)
+            embedUrl = NativeProviderParsers.absoluteUrl(embedUrl, iframe)
+            page = runCatching { getText(embedUrl, mapOf("Referer" to embed.referer)) }.getOrDefault(page)
         }
 
         val streams = mutableListOf<StreamItem>()
         val subtitles = mutableListOf<SubtitleItem>()
         val fileId = page.data("id")
         val origin = origin(embedUrl)
-        var skip: SkipTimes? = null
+        var skip = embed.skip
         if (!fileId.isNullOrBlank()) {
             val source = runCatching {
                 getJson("$origin/stream/getSources?id=${enc(fileId)}&id=${enc(fileId)}", mapOf(
@@ -126,10 +150,117 @@ class AnivexaClient(
                 val file = obj.string("file") ?: return@forEach
                 subtitles += SubtitleItem(file, obj.string("label") ?: "Subtitle", language(obj.string("label")))
             }
-            skip = skipTimes(source)
+            skip = skipTimes(source) ?: skip
         }
-        streams += stream(embedUrl, "embed", "MegaPlay embed", "$origin/", active = streams.isEmpty())
-        return SourcesResult(streams.distinctBy { it.url }, subtitles.distinctBy { it.url }, skip, null)
+        return MegaPlayResult(embedUrl, origin, streams.distinctBy { it.url }, subtitles.distinctBy { it.url }, skip)
+    }
+
+    private fun anikotoSiteEmbed(media: Media, audio: String, episode: Int): MegaPlayEmbed? {
+        val base = "https://anikototv.to"
+        val key = "anikoto-site:${media.id}"
+        val cached = identityCache[key]?.let { listOf(Candidate(it, it.replace('-', ' '))) }.orEmpty()
+        val candidates = (cached + anikotoSiteCandidates(base, media))
+            .distinctBy { it.slug }
+            .sortedByDescending { candidateScore(media, it) }
+            .take(12)
+        candidates.forEach { candidate ->
+            val embed = runCatching { anikotoSiteEmbedForSlug(base, candidate.slug, media, audio, episode) }
+                .getOrNull()
+            if (embed != null) {
+                identityCache[key] = candidate.slug
+                return embed
+            }
+        }
+        return null
+    }
+
+    private fun anikotoSiteCandidates(base: String, media: Media): List<Candidate> =
+        titles(media).flatMap { query ->
+            runCatching {
+                val search = getJson("$base/ajax/anime/search?keyword=${enc(query)}", xhr("$base/"))
+                val html = htmlResult(search)
+                Regex(
+                    """<a\b([^>]*href=["'][^"']*/watch/[^"']+["'][^>]*)>([\s\S]*?)</a>""",
+                    setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
+                ).findAll(html).mapNotNull { match ->
+                    val href = NativeProviderParsers.attr(match.groupValues[1], "href")
+                    val slug = Regex("""/watch/([^/?#"']+)""").find(href)?.groupValues?.get(1)
+                        ?: return@mapNotNull null
+                    Candidate(
+                        slug,
+                        NativeProviderParsers.stripTags(match.groupValues[2]).ifBlank { slug.replace('-', ' ') },
+                    )
+                }.toList()
+            }.getOrDefault(emptyList())
+        }.distinctBy { it.slug }
+
+    private fun anikotoSiteEmbedForSlug(
+        base: String,
+        slug: String,
+        media: Media,
+        audio: String,
+        episode: Int,
+    ): MegaPlayEmbed? {
+        val watchUrl = "$base/watch/$slug/ep-$episode"
+        val watch = getText(watchUrl, mapOf("Referer" to "$base/"))
+        val animeId = Regex("""data-anime-id=["'](\d+)["']""", RegexOption.IGNORE_CASE)
+            .find(watch)?.groupValues?.get(1)
+            ?: return null
+        val episodes = getJson("$base/ajax/episode/list/$animeId", xhr(watchUrl)) as? JsonObject ?: return null
+        val episodeTag = anikotoEpisodeTag(htmlResult(episodes), media, audio, episode) ?: return null
+        val serverToken = NativeProviderParsers.attr(episodeTag, "data-ids").takeIf { it.isNotBlank() } ?: return null
+        val servers = getJson("$base/ajax/server/list?servers=${enc(serverToken)}", xhr(watchUrl)) as? JsonObject
+            ?: return null
+        val linkId = anikotoServerLink(htmlResult(servers), audio) ?: return null
+        val resolved = getJson("$base/ajax/server?get=${enc(linkId)}", xhr(watchUrl)) as? JsonObject ?: return null
+        val result = (resolved["result"] as? JsonObject) ?: resolved
+        val url = result.string("url") ?: return null
+        return MegaPlayEmbed(url, "$base/", anikotoSkipData(result["skip_data"] as? JsonObject))
+    }
+
+    private fun anikotoEpisodeTag(html: String, media: Media, audio: String, episode: Int): String? {
+        val expectedMal = media.idMal?.toString()
+        val audioAttr = if (audio == "dub") "data-dub" else "data-sub"
+        val tags = Regex("""<a\b[^>]*>""", RegexOption.IGNORE_CASE).findAll(html)
+            .map { it.value }
+            .filter { tag ->
+                val num = NativeProviderParsers.attr(tag, "data-num").toIntOrNull()
+                val slug = NativeProviderParsers.attr(tag, "data-slug").toIntOrNull()
+                (num == episode || slug == episode) &&
+                    NativeProviderParsers.attr(tag, audioAttr).let { it.isBlank() || it == "1" }
+            }
+            .toList()
+        if (expectedMal != null) {
+            return tags.firstOrNull { tag -> NativeProviderParsers.attr(tag, "data-mal") == expectedMal }
+        }
+        return tags.firstOrNull()
+    }
+
+    private fun anikotoServerLink(html: String, audio: String): String? {
+        val items = Regex(
+            """<li\b[^>]*\bdata-link-id=["'][^"']+["'][^>]*>[\s\S]*?</li>""",
+            setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
+        ).findAll(html).map { it.value }.toList()
+        val compatible = items.filter { item ->
+            NativeProviderParsers.attr(item, "data-type").let { it.isBlank() || it.equals(audio, true) }
+        }.ifEmpty { items }
+        val preferred = compatible.firstOrNull {
+            NativeProviderParsers.attr(it, "data-sv-id").equals("e54", true) ||
+                it.contains("Vidstream", ignoreCase = true)
+        } ?: compatible.firstOrNull()
+        return preferred?.let { NativeProviderParsers.attr(it, "data-link-id").takeIf { link -> link.isNotBlank() } }
+    }
+
+    private fun anikotoSkipData(root: JsonObject?): SkipTimes? {
+        fun range(name: String): Pair<Double?, Double?> {
+            val values = root?.get(name) as? JsonArray ?: return null to null
+            return ((values.getOrNull(0) as? JsonPrimitive)?.doubleOrNull) to
+                ((values.getOrNull(1) as? JsonPrimitive)?.doubleOrNull)
+        }
+        val intro = range("intro")
+        val outro = range("outro")
+        if (intro.first == null && intro.second == null && outro.first == null && outro.second == null) return null
+        return SkipTimes(intro.first, intro.second, outro.first, outro.second)
     }
 
     // ---- ReAnime --------------------------------------------------------------------------
@@ -384,6 +515,17 @@ class AnivexaClient(
         media.title.romaji,
         media.title.native,
     ).filter { it.isNotBlank() }.distinct()
+
+    private fun xhr(referer: String): Map<String, String> = mapOf(
+        "Referer" to referer,
+        "X-Requested-With" to "XMLHttpRequest",
+    )
+
+    private fun htmlResult(element: JsonElement?): String = when (element) {
+        is JsonObject -> element.string("html") ?: element.string("result") ?: htmlResult(element["result"])
+        is JsonPrimitive -> element.contentOrNull.orEmpty()
+        else -> ""
+    }
 
     private fun getText(url: String, headers: Map<String, String> = emptyMap()): String {
         val builder = Request.Builder().url(url)
