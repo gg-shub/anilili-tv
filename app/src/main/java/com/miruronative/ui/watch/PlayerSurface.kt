@@ -11,14 +11,11 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -40,6 +37,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.media3.common.C
 import androidx.media3.common.TrackSelectionParameters
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.TrackGroup
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.MimeTypes
@@ -49,6 +48,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.DefaultTrackNameProvider
 import androidx.media3.ui.PlayerView
 import com.miruronative.data.model.SkipTimes
 import com.miruronative.data.model.StreamItem
@@ -58,6 +58,7 @@ import com.miruronative.ui.adaptive.LocalAppDeviceProfile
 import com.miruronative.ui.nav.Routes
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlin.math.abs
 
 /** Media3 player surface backed by [PlaybackService] for PiP and system media controls. */
 @OptIn(UnstableApi::class)
@@ -169,6 +170,7 @@ fun PlayerSurface(
 
     var playerView by remember { mutableStateOf<PlayerView?>(null) }
     var controllerVisible by remember { mutableStateOf(false) }
+    var settingsExpanded by remember { mutableStateOf(false) }
     var seekFlash by remember { mutableIntStateOf(0) } // -10 / +10, 0 = hidden
     var seekFlashTick by remember { mutableIntStateOf(0) }
     LaunchedEffect(seekFlashTick) {
@@ -198,16 +200,21 @@ fun PlayerSurface(
                     setControllerVisibilityListener(
                         PlayerView.ControllerVisibilityListener { visibility ->
                             controllerVisible = visibility == View.VISIBLE
+                            if (visibility != View.VISIBLE) settingsExpanded = false
                         },
                     )
                     if (onToggleFullscreen != null) {
                         setFullscreenButtonClickListener { onToggleFullscreen() }
                     }
+                    bindUnifiedSettingsButton { settingsExpanded = true }
                     if (device.isTv) post { requestFocus() }
                     playerView = this
                 }
             },
-            update = { it.player = controller },
+            update = {
+                it.player = controller
+                it.bindUnifiedSettingsButton { settingsExpanded = true }
+            },
             onRelease = {
                 it.player = null
                 playerView = null
@@ -253,12 +260,13 @@ fun PlayerSurface(
             )
         }
 
-        QualityMenu(
+        PlaybackSettingsMenu(
             controller = controller,
-            visible = controllerVisible,
+            expanded = settingsExpanded && controllerVisible,
+            onDismiss = { settingsExpanded = false },
             modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(8.dp),
+                .align(Alignment.BottomEnd)
+                .padding(end = 12.dp, bottom = 72.dp),
         )
 
         if (controller == null) {
@@ -291,35 +299,35 @@ fun PlayerSurface(
     }
 }
 
-/** Manual resolution picker: Auto (adaptive) or pin one of the stream's video heights. */
+/** Unified settings opened from Media3's built-in settings button. */
 @OptIn(UnstableApi::class)
 @Composable
-private fun QualityMenu(
+private fun PlaybackSettingsMenu(
     controller: MediaController?,
-    visible: Boolean,
+    expanded: Boolean,
+    onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    if (controller == null || !visible) return
-    var expanded by remember { mutableStateOf(false) }
+    if (controller == null) return
     var pinnedHeight by remember(controller) { mutableStateOf<Int?>(null) }
+    val context = LocalContext.current
+    val trackNameProvider = remember(context) { DefaultTrackNameProvider(context.resources) }
 
     Box(modifier) {
-        IconButton(onClick = { expanded = true }) {
-            Icon(Icons.Default.Settings, contentDescription = "Video quality", tint = Color.White)
-        }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+        DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
             val heights = controller.currentTracks.groups
                 .filter { it.type == C.TRACK_TYPE_VIDEO }
                 .flatMap { group -> (0 until group.length).map { group.getTrackFormat(it).height } }
                 .filter { it > 0 }
                 .distinct()
                 .sortedDescending()
+            SectionLabel("Quality")
             DropdownMenuItem(
                 text = { Text(if (pinnedHeight == null) "Auto ✓" else "Auto") },
                 onClick = {
                     applyVideoHeight(controller, null)
                     pinnedHeight = null
-                    expanded = false
+                    onDismiss()
                 },
             )
             heights.forEach { height ->
@@ -328,26 +336,121 @@ private fun QualityMenu(
                     onClick = {
                         applyVideoHeight(controller, height)
                         pinnedHeight = height
-                        expanded = false
+                        onDismiss()
                     },
                 )
             }
             if (heights.isEmpty()) {
-                DropdownMenuItem(text = { Text("Only one quality available") }, onClick = { expanded = false })
+                DropdownMenuItem(text = { Text("Only one quality available") }, onClick = onDismiss)
+            }
+
+            HorizontalDivider()
+            SectionLabel("Playback speed")
+            PlaybackSpeeds.forEach { speed ->
+                val selected = abs(controller.playbackParameters.speed - speed) < 0.01f
+                DropdownMenuItem(
+                    text = { Text("${speed.formatSpeed()}${if (selected) " ✓" else ""}") },
+                    onClick = {
+                        controller.setPlaybackSpeed(speed)
+                        onDismiss()
+                    },
+                )
+            }
+
+            val audioTracks = audioTrackOptions(controller, trackNameProvider)
+            if (audioTracks.isNotEmpty()) {
+                HorizontalDivider()
+                SectionLabel("Audio")
+                DropdownMenuItem(
+                    text = { Text("Auto") },
+                    onClick = {
+                        applyAudioTrack(controller, null)
+                        onDismiss()
+                    },
+                )
+                audioTracks.forEach { option ->
+                    DropdownMenuItem(
+                        text = { Text("${option.name}${if (option.selected) " ✓" else ""}") },
+                        onClick = {
+                            applyAudioTrack(controller, option)
+                            onDismiss()
+                        },
+                    )
+                }
             }
         }
     }
 }
 
+@Composable
+private fun SectionLabel(text: String) {
+    Text(
+        text = text,
+        color = MaterialTheme.colorScheme.primary,
+        style = MaterialTheme.typography.labelMedium,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+    )
+}
+
 private fun applyVideoHeight(controller: MediaController, height: Int?) {
     val builder: TrackSelectionParameters.Builder = controller.trackSelectionParameters.buildUpon()
     if (height == null) {
-        builder.setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE).setMinVideoSize(0, 0)
+        builder.clearVideoSizeConstraints()
     } else {
         builder.setMaxVideoSize(Int.MAX_VALUE, height).setMinVideoSize(0, height)
     }
     controller.trackSelectionParameters = builder.build()
 }
+
+private fun audioTrackOptions(
+    controller: MediaController,
+    trackNameProvider: DefaultTrackNameProvider,
+): List<AudioTrackOption> = controller.currentTracks.groups
+    .filter { it.type == C.TRACK_TYPE_AUDIO && it.isSupported }
+    .flatMap { group ->
+        (0 until group.length)
+            .filter { group.isTrackSupported(it) }
+            .map { index ->
+                AudioTrackOption(
+                    trackGroup = group.getMediaTrackGroup(),
+                    trackIndex = index,
+                    name = trackNameProvider.getTrackName(group.getTrackFormat(index)),
+                    selected = group.isTrackSelected(index),
+                )
+            }
+    }
+
+private fun applyAudioTrack(controller: MediaController, option: AudioTrackOption?) {
+    val builder = controller.trackSelectionParameters.buildUpon()
+        .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+        .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
+    if (option != null) {
+        builder.setOverrideForType(TrackSelectionOverride(option.trackGroup, listOf(option.trackIndex)))
+    }
+    controller.trackSelectionParameters = builder.build()
+}
+
+private fun PlayerView.bindUnifiedSettingsButton(onClick: () -> Unit) {
+    findViewById<View>(androidx.media3.ui.R.id.exo_settings)?.setOnClickListener {
+        showController()
+        onClick()
+    }
+}
+
+private fun Float.formatSpeed(): String = if (this % 1f == 0f) {
+    "${toInt()}x"
+} else {
+    "${this}x"
+}
+
+private data class AudioTrackOption(
+    val trackGroup: TrackGroup,
+    val trackIndex: Int,
+    val name: String,
+    val selected: Boolean,
+)
+
+private val PlaybackSpeeds = listOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
 
 private fun mimeFor(url: String): String = when {
     url.contains(".vtt", ignoreCase = true) -> MimeTypes.TEXT_VTT

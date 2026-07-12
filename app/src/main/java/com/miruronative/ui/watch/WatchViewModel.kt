@@ -25,6 +25,7 @@ data class WatchData(
     val currentIndex: Int,
     val provider: String,
     val category: Category,
+    val sourceOptions: List<WatchSourceOption>,
     val anilistId: Int,
     val sources: SourcesResult,
     val chosenStream: StreamItem?,
@@ -38,6 +39,13 @@ data class WatchData(
     val hasNext: Boolean get() = currentIndex < episodes.lastIndex
     val hasPrev: Boolean get() = currentIndex > 0
 }
+
+data class WatchSourceOption(
+    val provider: String,
+    val category: Category,
+    val hasCurrentEpisode: Boolean,
+    val episodeCount: Int,
+)
 
 class WatchViewModel : ViewModel() {
     private val repo = AppGraph.repository
@@ -55,6 +63,7 @@ class WatchViewModel : ViewModel() {
     private var lastRequestedNumber = 1.0
     private var failedProviders = mutableSetOf<String>()
     private var resolveJob: Job? = null
+    private var mergedEpisodes = EpisodesResult(emptyList())
 
     fun start(id: Int, providerName: String, categoryApi: String, episodeNumber: String) {
         val key = "$id/$providerName/$categoryApi/$episodeNumber"
@@ -68,6 +77,7 @@ class WatchViewModel : ViewModel() {
             _state.value = UiState.Loading
             try {
                 val merged = repo.episodes(id)
+                mergedEpisodes = merged
                 repo.animeInfo(id)?.let { info ->
                     seriesTitle = info.title.preferred
                     artworkUrl = info.coverImage.best
@@ -117,6 +127,7 @@ class WatchViewModel : ViewModel() {
                 currentIndex = index,
                 provider = resolved.provider,
                 category = category,
+                sourceOptions = sourceOptions(number),
                 anilistId = anilistId,
                 sources = resolved.sources,
                 chosenStream = pickStream(resolved.sources),
@@ -127,6 +138,19 @@ class WatchViewModel : ViewModel() {
             ),
         )
         recordHistory(number, resolved.provider)
+    }
+
+    fun changeSource(providerName: String, categoryApi: String) {
+        val nextCategory = Category.from(categoryApi)
+        val provider = mergedEpisodes.provider(providerName) ?: return
+        val nextSpine = provider.episodes(nextCategory).takeIf { it.isNotEmpty() } ?: return
+        val currentNumber = (_state.value as? UiState.Success)?.data?.current?.number ?: lastRequestedNumber
+
+        preferred = providerName
+        category = nextCategory
+        spine = nextSpine
+        failedProviders.clear()
+        launchResolve(nextSpine.firstOrNull { it.number == currentNumber }?.number ?: nextSpine.first().number)
     }
 
     private suspend fun recordHistory(number: Double, provider: String) {
@@ -211,6 +235,22 @@ class WatchViewModel : ViewModel() {
         sources.hlsStreams.maxByOrNull { (it.height ?: 0) + if (it.isActive) 100_000 else 0 }
             ?: sources.embedStreams.firstOrNull()
             ?: sources.streams.firstOrNull()
+
+    private fun sourceOptions(number: Double): List<WatchSourceOption> =
+        mergedEpisodes.providers
+            .flatMap { provider ->
+                provider.categories.map { category ->
+                    val episodes = provider.episodes(category)
+                    WatchSourceOption(
+                        provider = provider.name,
+                        category = category,
+                        hasCurrentEpisode = episodes.any { it.number == number },
+                        episodeCount = episodes.size,
+                    )
+                }
+            }
+            .filter { it.episodeCount > 0 }
+            .sortedWith(compareBy<WatchSourceOption> { ProviderCatalog.sortKey(it.provider) }.thenBy { it.category.ordinal })
 
     private fun fmt(n: Double): String = if (n % 1.0 == 0.0) n.toInt().toString() else n.toString()
 }

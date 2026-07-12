@@ -8,6 +8,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,11 +25,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -38,6 +40,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -67,6 +70,7 @@ fun WatchScreen(
     episode: String,
     inPictureInPicture: Boolean = false,
     onBack: () -> Unit,
+    onAnimeDetails: () -> Unit,
     vm: WatchViewModel = viewModel(),
 ) {
     LaunchedEffect(animeId, provider, category, episode) {
@@ -79,6 +83,13 @@ fun WatchScreen(
     val context = LocalContext.current
     val device = LocalAppDeviceProfile.current
     val activity = remember(context) { context.findActivity() }
+    val currentOnBack by rememberUpdatedState(onBack)
+    val pauseAndBack = remember {
+        {
+            PlaybackService.pauseActivePlayback()
+            currentOnBack()
+        }
+    }
 
     LaunchedEffect(webFallback) {
         if (webFallback) PlaybackService.stopActivePlayback()
@@ -116,6 +127,7 @@ fun WatchScreen(
 
     // Back exits fullscreen first, then the screen.
     BackHandler(enabled = fullscreen) { fullscreen = false }
+    BackHandler(enabled = !fullscreen) { pauseAndBack() }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         if (webFallback) {
@@ -126,14 +138,14 @@ fun WatchScreen(
                 onFullscreenChanged = { fullscreen = it },
                 onProgress = vm::onProgress,
             )
-            BackButton(onBack, Modifier.align(Alignment.TopStart))
+            BackButton(pauseAndBack, Modifier.align(Alignment.TopStart))
             return@Box
         }
 
         when (val s = state) {
             is UiState.Loading -> {
                 LoadingBox()
-                BackButton(onBack, Modifier.align(Alignment.TopStart))
+                BackButton(pauseAndBack, Modifier.align(Alignment.TopStart))
             }
             is UiState.Error -> Column(Modifier.fillMaxSize()) {
                 ErrorBox(s.message, onRetry = vm::retry, modifier = Modifier.weight(1f))
@@ -144,14 +156,16 @@ fun WatchScreen(
                         .padding(bottom = 24.dp)
                         .focusHighlight(RoundedCornerShape(20.dp)),
                 ) { Text("Open in web player") }
-                BackButton(onBack, Modifier.align(Alignment.Start))
+                BackButton(pauseAndBack, Modifier.align(Alignment.Start))
             }
             is UiState.Success -> WatchContent(
                 data = s.data,
                 fullscreen = fullscreen || inPictureInPicture,
-                onBack = onBack,
+                onBack = pauseAndBack,
+                onAnimeDetails = onAnimeDetails,
                 onPrev = vm::prev,
                 onNext = vm::next,
+                onChangeSource = vm::changeSource,
                 onSelectEpisode = vm::playIndex,
                 onWebFallback = { webFallback = true },
                 onToggleFullscreen = { fullscreen = !fullscreen },
@@ -168,8 +182,10 @@ private fun WatchContent(
     data: WatchData,
     fullscreen: Boolean,
     onBack: () -> Unit,
+    onAnimeDetails: () -> Unit,
     onPrev: () -> Unit,
     onNext: () -> Unit,
+    onChangeSource: (String, String) -> Unit,
     onSelectEpisode: (Int) -> Unit,
     onWebFallback: () -> Unit,
     onToggleFullscreen: () -> Unit,
@@ -179,6 +195,7 @@ private fun WatchContent(
 ) {
     val device = LocalAppDeviceProfile.current
     val configuration = LocalConfiguration.current
+    var sourceMenuExpanded by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
         val playerModifier = if (fullscreen) {
             Modifier.fillMaxSize()
@@ -249,64 +266,110 @@ private fun WatchContent(
         }
         LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
             item {
-                Column(
+                Row(
                     Modifier
-                        .padding(device.pagePadding)
+                        .padding(
+                            start = device.pagePadding,
+                            end = device.pagePadding,
+                            top = 14.dp,
+                            bottom = 8.dp,
+                        )
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(MaterialTheme.colorScheme.surface)
-                        .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))
-                        .padding(14.dp),
+                        .focusGroup(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text(
-                        text = "Episode ${data.current.displayNumber}" +
-                            (data.current.title?.let { ": $it" } ?: ""),
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = "${ProviderCatalog.label(data.provider)} • ${data.category.api.uppercase()}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    data.notice?.let { notice ->
+                    Column(Modifier.weight(1f)) {
                         Text(
-                            text = notice,
+                            "Episodes",
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                        Text(
+                            text = "Episode ${data.current.displayNumber}" +
+                                (data.current.title?.let { ": $it" } ?: "") +
+                                " • ${ProviderCatalog.label(data.provider)} ${data.category.api.uppercase()}",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.padding(top = 4.dp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
                     }
-                    Row(
-                        Modifier.fillMaxWidth().padding(top = 10.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    IconButton(
+                        onClick = onPrev,
+                        enabled = data.hasPrev,
+                        modifier = Modifier.focusHighlight(RoundedCornerShape(24.dp)),
                     ) {
-                        OutlinedButton(
-                            onClick = onPrev,
-                            enabled = data.hasPrev,
-                            modifier = Modifier.focusHighlight(RoundedCornerShape(24.dp)),
+                        Icon(Icons.Default.SkipPrevious, contentDescription = "Previous episode")
+                    }
+                    IconButton(
+                        onClick = onNext,
+                        enabled = data.hasNext,
+                        modifier = Modifier.focusHighlight(RoundedCornerShape(24.dp)),
+                    ) {
+                        Icon(Icons.Default.SkipNext, contentDescription = "Next episode")
+                    }
+                }
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = device.pagePadding, vertical = 0.dp)
+                        .focusGroup(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(
+                        onClick = onAnimeDetails,
+                        modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp)),
+                    ) {
+                        Text("Anime page")
+                    }
+                    Box {
+                        TextButton(
+                            onClick = { sourceMenuExpanded = true },
+                            enabled = data.sourceOptions.size > 1,
+                            modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp)),
                         ) {
-                            Icon(Icons.Default.SkipPrevious, contentDescription = null)
-                            Text("Prev", Modifier.padding(start = 4.dp))
+                            Text("Source: ${ProviderCatalog.label(data.provider)} ${data.category.api.uppercase()}")
                         }
-                        OutlinedButton(
-                            onClick = onNext,
-                            enabled = data.hasNext,
-                            modifier = Modifier.focusHighlight(RoundedCornerShape(24.dp)),
+                        DropdownMenu(
+                            expanded = sourceMenuExpanded,
+                            onDismissRequest = { sourceMenuExpanded = false },
                         ) {
-                            Text("Next", Modifier.padding(end = 4.dp))
-                            Icon(Icons.Default.SkipNext, contentDescription = null)
+                            data.sourceOptions.forEach { option ->
+                                val selected = option.provider == data.provider && option.category == data.category
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            buildString {
+                                                append(ProviderCatalog.label(option.provider))
+                                                append(" ")
+                                                append(option.category.api.uppercase())
+                                                if (!option.hasCurrentEpisode) append(" • first available")
+                                                if (selected) append(" ✓")
+                                            },
+                                        )
+                                    },
+                                    onClick = {
+                                        sourceMenuExpanded = false
+                                        onChangeSource(option.provider, option.category.api)
+                                    },
+                                )
+                            }
                         }
                     }
                 }
-            }
-            item {
-                Text(
-                    "Episodes",
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(start = device.pagePadding, bottom = 4.dp),
-                )
+                data.notice?.let { notice ->
+                    Text(
+                        text = notice,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(
+                            start = device.pagePadding,
+                            end = device.pagePadding,
+                            bottom = 6.dp,
+                        ),
+                    )
+                }
             }
             items(episodeRows) { row ->
                 Row(

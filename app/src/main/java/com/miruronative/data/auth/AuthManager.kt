@@ -10,22 +10,15 @@ import kotlinx.coroutines.flow.asStateFlow
 import com.miruronative.data.reminder.ReleaseSyncScheduler
 
 /**
- * AniList OAuth (Implicit Grant). We open the authorize URL in a WebView and capture the
- * access token from the `http://localhost/#access_token=…` redirect fragment — no external
- * browser, no client secret in the app. Tokens are long-lived (~1 year; AniList has no refresh).
+ * AniList OAuth (Implicit Grant). We open the authorize URL in the browser or fallback WebView and
+ * capture the access token from the `http://localhost/#access_token=…` redirect fragment — no
+ * client secret in the app. Tokens are long-lived (~1 year; AniList has no refresh).
  */
 object AuthManager {
     const val CLIENT_ID = "45552"
     const val REDIRECT = "http://localhost"
-    val AUTHORIZE_URL: String = Uri.Builder()
-        .scheme("https")
-        .authority("anilist.co")
-        .path("/api/v2/oauth/authorize")
-        .appendQueryParameter("client_id", CLIENT_ID)
-        .appendQueryParameter("redirect_uri", REDIRECT)
-        .appendQueryParameter("response_type", "token")
-        .build()
-        .toString()
+    const val AUTHORIZE_URL =
+        "https://anilist.co/api/v2/oauth/authorize?client_id=$CLIENT_ID&response_type=token"
 
     private lateinit var prefs: SharedPreferences
     private lateinit var appContext: Context

@@ -235,6 +235,9 @@ fun EmbedWebView(
             onRelease = { view ->
                 val web = view as? WebView ?: return@AndroidView
                 if (webView === web) webView = null
+                runCatching { web.evaluateJavascript(PAUSE_VIDEO_JS, null) }
+                web.onPause()
+                web.pauseTimers()
                 web.stopLoading()
                 web.removeJavascriptInterface("AniliProgress")
                 web.loadUrl("about:blank")

@@ -374,6 +374,13 @@ private fun AppNavHost(
                     episode = args.getString(Routes.Arg.EPISODE).orEmpty(),
                     inPictureInPicture = inPictureInPicture,
                     onBack = { nav.popBackStack() },
+                    onAnimeDetails = {
+                        val id = args.getInt(Routes.Arg.ID)
+                        val route = Routes.detail(id)
+                        if (!nav.popBackStack(route, inclusive = false)) {
+                            nav.navigate(route) { launchSingleTop = true }
+                        }
+                    },
                 )
             }
         }
