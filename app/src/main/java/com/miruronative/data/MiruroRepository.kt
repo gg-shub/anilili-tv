@@ -178,7 +178,7 @@ class MiruroRepository(
         sort,
     ).joinToString("|")
 
-    private fun Any?.orEmpty(): String = this?.toString().orEmpty()
+    private fun Any?.orEmpty(): String = this?.toString() ?: ""
 
     private companion object {
         const val SCHEDULE_TTL = 15L * 60 * 1000
