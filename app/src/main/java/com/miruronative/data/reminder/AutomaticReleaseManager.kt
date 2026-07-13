@@ -237,28 +237,40 @@ class ReleaseSyncWorker(
         }
         return try {
             val repo = AppGraph.repository
-            val tracked = mutableListOf<Media>()
-            tracked += coroutineScope {
+            val localSaved = coroutineScope {
                 LibraryStore.watchlist.value.map { saved ->
                     async { runCatching { repo.animeInfo(saved.anilistId) }.getOrNull() }
                 }.awaitAll().filterNotNull()
             }
             if (AuthManager.isLoggedIn) {
-                val viewer = runCatching { repo.viewer() }.getOrNull()
-                if (viewer != null) {
-                    val activeStatuses = setOf("CURRENT", "REPEATING", "PLANNING", "PAUSED")
-                    tracked += runCatching { repo.userAnimeList(viewer.id) }.getOrNull()
-                        ?.lists.orEmpty()
-                        .filter { it.status in activeStatuses }
-                        .flatMap { it.entries }
-                        .mapNotNull { it.media }
-                    tracked += runCatching { repo.favouriteAnime() }.getOrDefault(emptyList())
+                runCatching {
+                    val (items, _) = repo.notifications(markAllRead = false)
+                    AniListNotificationPushManager.notifyUnread(applicationContext, items)
                 }
+
+                val aniListTracked = anilistTrackedMedia(repo)
+                val aniListIds = aniListTracked.mapTo(hashSetOf()) { it.id }
+                // AniList notifications are now the canonical push source for logged-in users.
+                // Keep local alarms only for device-only saves that AniList cannot notify about.
+                AutomaticReleaseManager.sync(localSaved.filterNot { it.id in aniListIds })
+            } else {
+                AutomaticReleaseManager.sync(localSaved.distinctBy { it.id })
             }
-            AutomaticReleaseManager.sync(tracked.distinctBy { it.id })
             Result.success()
         } catch (_: Exception) {
             Result.retry()
         }
+    }
+
+    private suspend fun anilistTrackedMedia(repo: com.miruronative.data.MiruroRepository): List<Media> {
+        val viewer = runCatching { repo.viewer() }.getOrNull() ?: return emptyList()
+        val activeStatuses = setOf("CURRENT", "REPEATING", "PLANNING", "PAUSED")
+        val listMedia = runCatching { repo.userAnimeList(viewer.id) }.getOrNull()
+            ?.lists.orEmpty()
+            .filter { it.status in activeStatuses }
+            .flatMap { it.entries }
+            .mapNotNull { it.media }
+        val favouriteMedia = runCatching { repo.favouriteAnime() }.getOrDefault(emptyList())
+        return (listMedia + favouriteMedia).distinctBy { it.id }
     }
 }

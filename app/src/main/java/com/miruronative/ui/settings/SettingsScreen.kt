@@ -217,8 +217,8 @@ fun SettingsScreen(
             item { SettingsSectionTitle("Notifications") }
             item {
                 SettingSwitch(
-                    "New episode alerts",
-                    "Notify when an episode airs for saved or favourite anime",
+                    "Notification alerts",
+                    "Logged in: AniList notifications; logged out: saved anime releases",
                     releaseNotifications,
                     ::setReleaseNotifications,
                 )

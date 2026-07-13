@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import android.net.Uri
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import com.miruronative.data.reminder.AniListNotificationPushManager
 import com.miruronative.data.reminder.ReleaseSyncScheduler
 
 /**
@@ -36,12 +37,14 @@ object AuthManager {
     fun setToken(token: String) {
         prefs.edit().putString("anilist_token", token).apply()
         _token.value = token
+        AniListNotificationPushManager.clearDelivered(appContext)
         ReleaseSyncScheduler.runNow(appContext)
     }
 
     fun logout() {
         prefs.edit().remove("anilist_token").apply()
         _token.value = null
+        AniListNotificationPushManager.clearDelivered(appContext)
         ReleaseSyncScheduler.runNow(appContext)
     }
 

@@ -17,6 +17,7 @@ import com.miruronative.data.library.LibraryStore
 import com.miruronative.data.settings.SettingsStore
 import com.miruronative.data.reminder.ReminderManager
 import com.miruronative.data.reminder.AutomaticReleaseManager
+import com.miruronative.data.reminder.AniListNotificationPushManager
 import com.miruronative.data.reminder.ReleaseSyncScheduler
 import com.miruronative.diagnostics.DiagnosticsLog
 
@@ -52,6 +53,7 @@ class MiruroApp : Application(), ImageLoaderFactory {
         diagnosticsStep("SettingsStore.init") { SettingsStore.init(this) }
         diagnosticsStep("ReminderManager.init") { ReminderManager.init(this) }
         diagnosticsStep("AutomaticReleaseManager.init") { AutomaticReleaseManager.init(this) }
+        diagnosticsStep("AniListNotificationPushManager.init") { AniListNotificationPushManager.init(this) }
         diagnosticsStep("ReleaseSyncScheduler.schedule") { ReleaseSyncScheduler.schedule(this) }
         DiagnosticsLog.event("MiruroApp.onCreate complete")
     }

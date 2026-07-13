@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -51,6 +52,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -229,6 +232,7 @@ private fun HomeContent(
     modifier: Modifier = Modifier,
 ) {
     val device = LocalAppDeviceProfile.current
+    val continueFocusRequester = remember { FocusRequester() }
     val columns = when {
         device.isTv -> 7
         device.isExpanded -> 6
@@ -241,9 +245,20 @@ private fun HomeContent(
         contentPadding = PaddingValues(bottom = 28.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        item { HeroPager(data.spotlight.take(6), onAnimeClick, onWatchNow) }
+        item {
+            HeroPager(
+                items = data.spotlight.take(6),
+                onAnimeClick = onAnimeClick,
+                onWatchNow = onWatchNow,
+                onMoveDown = if (history.isNotEmpty()) {
+                    { runCatching { continueFocusRequester.requestFocus() } }
+                } else {
+                    null
+                },
+            )
+        }
         if (history.isNotEmpty()) {
-            item { ContinueRail(history.take(12), onResume) }
+            item { ContinueRail(history.take(12), onResume, continueFocusRequester) }
         }
         item { HomeCatalogTabs(selectedTab, onSelectTab) }
         items(catalog.chunked(columns)) { row ->
@@ -297,7 +312,12 @@ private fun HomeCatalogTabs(selected: HomeTab, onSelect: (HomeTab) -> Unit) {
 }
 
 @Composable
-private fun HeroPager(items: List<Media>, onAnimeClick: (Int) -> Unit, onWatchNow: (Int) -> Unit) {
+private fun HeroPager(
+    items: List<Media>,
+    onAnimeClick: (Int) -> Unit,
+    onWatchNow: (Int) -> Unit,
+    onMoveDown: (() -> Unit)?,
+) {
     if (items.isEmpty()) return
     val device = LocalAppDeviceProfile.current
     val pagerState = rememberPagerState(pageCount = { items.size })
@@ -332,6 +352,7 @@ private fun HeroPager(items: List<Media>, onAnimeClick: (Int) -> Unit, onWatchNo
                 onNext = {
                     scope.launch { pagerState.animateScrollToPage(page + 1) }
                 },
+                onMoveDown = onMoveDown,
             )
         }
         Row(
@@ -360,6 +381,7 @@ private fun HeroCard(
     canGoNext: Boolean,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
+    onMoveDown: (() -> Unit)?,
 ) {
     val device = LocalAppDeviceProfile.current
     Box(Modifier.fillMaxSize()) {
@@ -401,9 +423,22 @@ private fun HeroCard(
                     colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black),
                     modifier = Modifier
                         .onPreviewKeyEvent { event ->
-                            if (device.isTv && canGoPrevious && event.type == KeyEventType.KeyDown && event.key == Key.DirectionLeft) {
-                                onPrevious()
-                                true
+                            if (device.isTv && event.type == KeyEventType.KeyDown) {
+                                when (event.key) {
+                                    Key.DirectionLeft -> {
+                                        if (canGoPrevious) {
+                                            onPrevious()
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    }
+                                    Key.DirectionDown -> {
+                                        onMoveDown?.invoke()
+                                        onMoveDown != null
+                                    }
+                                    else -> false
+                                }
                             } else {
                                 false
                             }
@@ -417,9 +452,22 @@ private fun HeroCard(
                     onClick = { onAnimeClick(media.id) },
                     modifier = Modifier
                         .onPreviewKeyEvent { event ->
-                            if (device.isTv && canGoNext && event.type == KeyEventType.KeyDown && event.key == Key.DirectionRight) {
-                                onNext()
-                                true
+                            if (device.isTv && event.type == KeyEventType.KeyDown) {
+                                when (event.key) {
+                                    Key.DirectionRight -> {
+                                        if (canGoNext) {
+                                            onNext()
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    }
+                                    Key.DirectionDown -> {
+                                        onMoveDown?.invoke()
+                                        onMoveDown != null
+                                    }
+                                    else -> false
+                                }
                             } else {
                                 false
                             }
@@ -461,7 +509,11 @@ private fun MediaRail(title: String, media: List<Media>, onAnimeClick: (Int) -> 
 }
 
 @Composable
-private fun ContinueRail(history: List<HistoryEntry>, onResume: (HistoryEntry) -> Unit) {
+private fun ContinueRail(
+    history: List<HistoryEntry>,
+    onResume: (HistoryEntry) -> Unit,
+    firstItemFocusRequester: FocusRequester,
+) {
     val device = LocalAppDeviceProfile.current
     val cardWidth = when {
         device.isTv -> 240.dp
@@ -481,10 +533,11 @@ private fun ContinueRail(history: List<HistoryEntry>, onResume: (HistoryEntry) -
             contentPadding = PaddingValues(horizontal = device.pagePadding, vertical = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(if (device.isTv) 18.dp else 10.dp),
         ) {
-            items(history, key = { it.anilistId }) { entry ->
+            itemsIndexed(history, key = { _, item -> item.anilistId }) { index, entry ->
                 Column(
                     Modifier
                         .width(cardWidth)
+                        .then(if (index == 0) Modifier.focusRequester(firstItemFocusRequester) else Modifier)
                         .focusHighlight()
                         .clickable { onResume(entry) },
                 ) {
