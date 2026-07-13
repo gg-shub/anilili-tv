@@ -60,6 +60,7 @@ import com.miruronative.data.library.WatchlistEntry
 import com.miruronative.data.model.Category
 import com.miruronative.data.model.EpisodeItem
 import com.miruronative.data.model.Media
+import com.miruronative.data.model.contentAdvisory
 import com.miruronative.ui.UiState
 import com.miruronative.ui.components.ErrorBox
 import com.miruronative.ui.components.LoadingBox
@@ -178,6 +179,7 @@ private fun DetailContent(
 
     LazyColumn(modifier = modifier.fillMaxSize()) {
         item { Header(info) }
+        item { ContentAdvisoryRow(info) }
         item { GenreRow(info.genres) }
         item { Description(info.description) }
 
@@ -266,6 +268,48 @@ private fun DetailContent(
             }
         }
         item { Spacer(Modifier.height(24.dp)) }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ContentAdvisoryRow(media: Media) {
+    val advisory = remember(media) { media.contentAdvisory() }
+    if (!advisory.isAdult && advisory.labels.isEmpty()) return
+    val device = LocalAppDeviceProfile.current
+    Column(Modifier.padding(horizontal = device.pagePadding, vertical = 4.dp)) {
+        Text(
+            "Content advisory",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(bottom = 5.dp),
+        )
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (advisory.isAdult) AdvisoryBadge("18+", adult = true)
+            advisory.labels.forEach { label -> AdvisoryBadge(label) }
+        }
+        Text(
+            "Estimated from AniList tags; not an official age rating",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+    }
+}
+
+@Composable
+private fun AdvisoryBadge(label: String, adult: Boolean = false) {
+    val background = if (adult) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.surfaceVariant
+    val foreground = if (adult) MaterialTheme.colorScheme.onError else MaterialTheme.colorScheme.onSurfaceVariant
+    Box(
+        Modifier
+            .padding(bottom = 4.dp)
+            .clip(RoundedCornerShape(5.dp))
+            .background(background)
+            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(5.dp))
+            .padding(horizontal = 7.dp, vertical = 4.dp),
+    ) {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = foreground)
     }
 }
 

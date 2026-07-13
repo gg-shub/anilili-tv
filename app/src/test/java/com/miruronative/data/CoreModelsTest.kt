@@ -1,6 +1,11 @@
 package com.miruronative.data
 
 import com.miruronative.data.library.HistoryEntry
+import com.miruronative.data.library.WatchlistEntry
+import com.miruronative.data.library.mergeWatchlistEntries
+import com.miruronative.data.model.Media
+import com.miruronative.data.model.MediaTag
+import com.miruronative.data.model.contentAdvisory
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -28,5 +33,41 @@ class CoreModelsTest {
     fun providerCatalogKeepsKnownMiruroProvidersAheadOfNativeFallbacks() {
         assertTrue(ProviderCatalog.sortKey("bonk") < ProviderCatalog.sortKey("anikoto"))
         assertEquals("Bonk", ProviderCatalog.label("bonk"))
+    }
+
+    @Test
+    fun contentAdvisoryUsesProminentNonSpoilerTagsAndAdultFlag() {
+        val advisory = Media(
+            id = 7,
+            isAdult = true,
+            tags = listOf(
+                MediaTag("Gore", rank = 70),
+                MediaTag("Profanity", rank = 60),
+                MediaTag("Torture", rank = 90, isMediaSpoiler = true),
+                MediaTag("Nudity", rank = 20),
+            ),
+        ).contentAdvisory()
+
+        assertTrue(advisory.isAdult)
+        assertEquals(listOf("Violence", "Sexual content", "Strong language", "Mature themes"), advisory.labels)
+    }
+
+    @Test
+    fun planningHydrationPreservesLocalEntriesAndRefreshesSharedMetadata() {
+        val local = listOf(
+            WatchlistEntry(1, "Local title", null, addedAt = 10),
+            WatchlistEntry(2, "Device only", null, addedAt = 20),
+        )
+        val remote = listOf(
+            WatchlistEntry(1, "AniList title", "cover"),
+            WatchlistEntry(3, "Remote only", null),
+        )
+
+        val merged = mergeWatchlistEntries(local, remote, addedAt = 99)
+
+        assertEquals(listOf(1, 2, 3), merged.map { it.anilistId })
+        assertEquals("AniList title", merged.first().title)
+        assertEquals(10, merged.first().addedAt)
+        assertEquals(99, merged.last().addedAt)
     }
 }

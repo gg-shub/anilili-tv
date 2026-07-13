@@ -9,9 +9,10 @@ object Routes {
     const val SEARCH = "search"
     const val SCHEDULE = "schedule"
     const val MORE = "more"
+    const val SETTINGS = "settings"
 
     /** Top-level destinations that show the bottom navigation bar. */
-    val tabRoutes = setOf(HOME, SEARCH, SCHEDULE, MORE)
+    val tabRoutes = setOf(HOME, SEARCH, SCHEDULE, MORE, SETTINGS)
 
     const val DETAIL = "detail/{id}"
     fun detail(id: Int) = "detail/$id"

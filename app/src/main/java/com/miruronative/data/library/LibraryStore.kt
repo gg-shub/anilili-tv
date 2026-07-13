@@ -102,6 +102,15 @@ object LibraryStore {
         }
     }
 
+    /** Merge AniList Planning into this device without deleting device-only saves. */
+    fun hydrateWatchlistFromAniList(entries: List<WatchlistEntry>) {
+        val merged = mergeWatchlistEntries(_watchlist.value, entries)
+        if (merged == _watchlist.value) return
+        _watchlist.value = merged
+        persist(KEY_WATCHLIST, merged, WatchlistEntry.serializer())
+        ReleaseSyncScheduler.runNow(appContext)
+    }
+
     // ---- persistence ----
 
     private fun <T> persist(key: String, list: List<T>, serializer: kotlinx.serialization.KSerializer<T>) {

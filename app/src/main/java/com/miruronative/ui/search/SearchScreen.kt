@@ -209,6 +209,7 @@ fun SearchScreen(
 @Composable
 private fun ResultsGrid(results: List<Media>, filters: DiscoverFilters, onAnimeClick: (Int) -> Unit) {
     val device = LocalAppDeviceProfile.current
+    val tileMinWidth = if (device.isTv) 118.dp else device.gridMinWidth
     if (results.isEmpty()) {
         Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -224,10 +225,10 @@ private fun ResultsGrid(results: List<Media>, filters: DiscoverFilters, onAnimeC
         return
     }
     LazyVerticalGrid(
-        columns = GridCells.Adaptive(device.gridMinWidth),
+        columns = GridCells.Adaptive(tileMinWidth),
         contentPadding = PaddingValues(horizontal = device.pagePadding, vertical = 14.dp),
-        horizontalArrangement = Arrangement.spacedBy(if (device.isTv) 18.dp else 9.dp),
-        verticalArrangement = Arrangement.spacedBy(if (device.isTv) 20.dp else 14.dp),
+        horizontalArrangement = Arrangement.spacedBy(if (device.isTv) 14.dp else 9.dp),
+        verticalArrangement = Arrangement.spacedBy(if (device.isTv) 16.dp else 14.dp),
     ) {
         item(span = { GridItemSpan(maxLineSpan) }) {
             Row(

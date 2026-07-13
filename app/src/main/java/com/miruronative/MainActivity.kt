@@ -26,6 +26,7 @@ import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -75,6 +76,7 @@ import com.miruronative.ui.nav.Routes
 import com.miruronative.ui.profile.ProfileScreen
 import com.miruronative.ui.schedule.ScheduleScreen
 import com.miruronative.ui.search.SearchScreen
+import com.miruronative.ui.settings.SettingsScreen
 import com.miruronative.ui.theme.MiruroTheme
 import com.miruronative.ui.watch.WatchScreen
 import com.miruronative.playback.PlaybackStatus
@@ -162,6 +164,7 @@ private enum class Tab(val route: String, val label: String, val icon: ImageVect
     SEARCH(Routes.SEARCH, "Search", Icons.Default.Search),
     SCHEDULE(Routes.SCHEDULE, "Schedule", Icons.Default.DateRange),
     MORE(Routes.MORE, "Library", Icons.AutoMirrored.Filled.List),
+    SETTINGS(Routes.SETTINGS, "Settings", Icons.Default.Settings),
 }
 
 @Composable
@@ -341,6 +344,9 @@ private fun AppNavHost(
                         nav.navigate(Routes.watch(e.anilistId, e.provider, e.category, e.episodeLabel))
                     },
                 )
+            }
+            composable(Routes.SETTINGS) {
+                SettingsScreen()
             }
 
             composable(

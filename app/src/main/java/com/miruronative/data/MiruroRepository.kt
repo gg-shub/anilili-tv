@@ -81,7 +81,7 @@ class MiruroRepository(
     suspend fun syncSavedAnime(mediaId: Int, saved: Boolean) = aniList.syncSavedAnime(mediaId, saved)
 
     suspend fun animeInfo(id: Int, force: Boolean = false): Media? = cache.getOrFetch(
-        key = "anime:$id",
+        key = "anime:v2:$id",
         serializer = Media.serializer().nullable,
         ttlMs = INFO_TTL,
         forceRefresh = force,
@@ -168,7 +168,7 @@ class MiruroRepository(
         force: Boolean = false,
         fetch: suspend () -> MediaPage,
     ): MediaPage = cache.getOrFetch(
-        key = "media:$key",
+        key = "media:v2:$key",
         serializer = MediaPage.serializer(),
         ttlMs = ttlMs,
         forceRefresh = force,

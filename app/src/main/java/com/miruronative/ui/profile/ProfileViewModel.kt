@@ -12,6 +12,7 @@ import com.miruronative.data.library.MalExport
 import com.miruronative.data.library.MalExportEntry
 import com.miruronative.data.library.MalExportFile
 import com.miruronative.data.library.WatchlistEntry
+import com.miruronative.data.settings.SettingsStore
 import com.miruronative.ui.UiState
 import com.miruronative.ui.rethrowIfCancellation
 import kotlinx.coroutines.Dispatchers
@@ -54,6 +55,20 @@ class ProfileViewModel : ViewModel() {
                 val paused = lists.filter { it.status == "PAUSED" }.flatMap { it.entries }
                 val completed = lists.filter { it.status == "COMPLETED" }.flatMap { it.entries }
                 val dropped = lists.filter { it.status == "DROPPED" }.flatMap { it.entries }
+                if (SettingsStore.syncSavedToAniList.value) {
+                    LibraryStore.hydrateWatchlistFromAniList(
+                        planning.mapNotNull { entry ->
+                            val media = entry.media ?: return@mapNotNull null
+                            WatchlistEntry(
+                                anilistId = media.id,
+                                title = media.title.preferred,
+                                cover = media.coverImage.best,
+                                format = media.format,
+                                averageScore = media.averageScore,
+                            )
+                        },
+                    )
+                }
                 _profile.value = UiState.Success(
                     AniListProfile(viewer, watching, rewatching, planning, paused, completed, dropped),
                 )

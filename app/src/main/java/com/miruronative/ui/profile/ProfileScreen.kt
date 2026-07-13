@@ -1,10 +1,5 @@
 package com.miruronative.ui.profile
 
-import android.Manifest
-import android.content.pm.PackageManager
-import android.os.Build
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -35,14 +30,12 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -53,14 +46,11 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -72,19 +62,13 @@ import coil.compose.AsyncImage
 import com.miruronative.data.auth.AuthManager
 import com.miruronative.data.library.HistoryEntry
 import com.miruronative.data.library.LibraryStore
-import com.miruronative.data.library.MalExportFile
 import com.miruronative.data.library.WatchlistEntry
 import com.miruronative.data.model.MediaListEntry
-import com.miruronative.data.reminder.AutomaticReleaseManager
-import com.miruronative.data.reminder.ReleaseSyncScheduler
-import com.miruronative.data.settings.SettingsStore
 import com.miruronative.ui.UiState
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
 import com.miruronative.ui.adaptive.focusHighlight
 import com.miruronative.ui.components.PullRefreshContainer
 import com.miruronative.ui.components.RatingBadge
-import androidx.core.content.ContextCompat
-import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -140,27 +124,17 @@ fun ProfileScreen(
     modifier: Modifier = Modifier,
     vm: ProfileViewModel = viewModel(),
 ) {
-    val context = LocalContext.current
     val device = LocalAppDeviceProfile.current
     val token by AuthManager.token.collectAsState()
     val profileState by vm.profile.collectAsState()
     val history by LibraryStore.history.collectAsState()
     val watchlist by LibraryStore.watchlist.collectAsState()
-    val autoplay by SettingsStore.autoplay.collectAsState()
-    val autoSync by SettingsStore.autoSyncAniList.collectAsState()
-    val preferDub by SettingsStore.preferDub.collectAsState()
-    val releaseNotifications by SettingsStore.releaseNotifications.collectAsState()
-    val syncSavedToAniList by SettingsStore.syncSavedToAniList.collectAsState()
     val isRefreshing by vm.isRefreshing.collectAsState()
     var showLogin by remember { mutableStateOf(false) }
-    var pendingMalExport by remember { mutableStateOf<MalExportFile?>(null) }
-    var malExportBusy by remember { mutableStateOf(false) }
-    var malExportMessage by remember { mutableStateOf<String?>(null) }
     var selectedViewName by rememberSaveable { mutableStateOf(LibraryView.WATCHLIST.name) }
     var selectedFormat by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedAiring by rememberSaveable { mutableStateOf<String?>(null) }
     var titleFilter by rememberSaveable { mutableStateOf("") }
-    val scope = rememberCoroutineScope()
 
     LaunchedEffect(token) {
         if (token == null) selectedViewName = LibraryView.WATCHLIST.name
@@ -195,73 +169,6 @@ fun ProfileScreen(
                 (titleFilter.isBlank() || entry.title.contains(titleFilter, ignoreCase = true))
         }
     }
-    val notificationPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        SettingsStore.setReleaseNotifications(granted)
-        if (granted) ReleaseSyncScheduler.runNow(context)
-    }
-    val malExportLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("text/xml"),
-    ) { uri ->
-        val file = pendingMalExport
-        pendingMalExport = null
-        if (uri == null || file == null) return@rememberLauncherForActivityResult
-        runCatching {
-            context.contentResolver.openOutputStream(uri)?.use { stream ->
-                stream.write(file.xml.toByteArray(Charsets.UTF_8))
-            } ?: error("Couldn't open export file")
-        }.onSuccess {
-            malExportMessage = buildString {
-                append("Exported ${file.exportedCount} anime")
-                if (file.skippedCount > 0) append("; skipped ${file.skippedCount} without MAL IDs")
-            }
-        }.onFailure { error ->
-            malExportMessage = error.message ?: "MAL export failed"
-        }
-    }
-
-    fun setReleaseNotifications(enabled: Boolean) {
-        if (!enabled) {
-            SettingsStore.setReleaseNotifications(false)
-            AutomaticReleaseManager.cancelAll()
-        } else if (
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-        } else {
-            SettingsStore.setReleaseNotifications(true)
-            ReleaseSyncScheduler.runNow(context)
-        }
-    }
-
-    fun setSavedSync(enabled: Boolean) {
-        SettingsStore.setSyncSavedToAniList(enabled)
-        if (enabled) LibraryStore.syncSavedToAniList()
-    }
-
-    fun exportMal() {
-        if (malExportBusy) return
-        scope.launch {
-            malExportBusy = true
-            malExportMessage = null
-            runCatching { vm.buildMalExport(profile, watchlist, history) }
-                .onSuccess { file ->
-                    if (file.exportedCount == 0) {
-                        malExportMessage = "No MAL-mapped anime to export"
-                    } else {
-                        pendingMalExport = file
-                        malExportLauncher.launch(file.fileName)
-                    }
-                }
-                .onFailure { error ->
-                    malExportMessage = error.message ?: "MAL export failed"
-                }
-            malExportBusy = false
-        }
-    }
-
     Scaffold(
         modifier = modifier,
         topBar = {
@@ -354,20 +261,6 @@ fun ProfileScreen(
                 }
             }
 
-            item {
-                SettingsPanel(
-                    autoplay = autoplay,
-                    preferDub = preferDub,
-                    autoSync = autoSync,
-                    releaseNotifications = releaseNotifications,
-                    syncSavedToAniList = syncSavedToAniList,
-                    malExportBusy = malExportBusy,
-                    malExportMessage = malExportMessage,
-                    onReleaseNotificationsChange = ::setReleaseNotifications,
-                    onSavedSyncChange = ::setSavedSync,
-                    onMalExport = ::exportMal,
-                )
-            }
             }
         }
     }
@@ -667,75 +560,6 @@ private fun CornerBadge(text: String, modifier: Modifier = Modifier) {
             fontWeight = FontWeight.Bold,
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
         )
-    }
-}
-
-@Composable
-private fun SettingsPanel(
-    autoplay: Boolean,
-    preferDub: Boolean,
-    autoSync: Boolean,
-    releaseNotifications: Boolean,
-    syncSavedToAniList: Boolean,
-    malExportBusy: Boolean,
-    malExportMessage: String?,
-    onReleaseNotificationsChange: (Boolean) -> Unit,
-    onSavedSyncChange: (Boolean) -> Unit,
-    onMalExport: () -> Unit,
-) {
-    val device = LocalAppDeviceProfile.current
-    Panel(Modifier.padding(horizontal = device.pagePadding, vertical = 8.dp)) {
-        Column(Modifier.padding(vertical = 8.dp)) {
-            Text("Playback & sync", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black, modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp))
-            SettingSwitch("Autoplay next episode", "Continue automatically", autoplay, SettingsStore::setAutoplay)
-            SettingSwitch("Prefer dubbed audio", "Use dub first when available", preferDub, SettingsStore::setPreferDub)
-            SettingSwitch("Sync progress to AniList", "Update episode progress while watching", autoSync, SettingsStore::setAutoSyncAniList)
-            SettingSwitch(
-                "Sync saved anime to AniList",
-                "New saves are added to Planning without replacing active list progress",
-                syncSavedToAniList,
-                onSavedSyncChange,
-            )
-            SettingSwitch(
-                "New episode alerts",
-                "Notify when an episode airs for saved or favourite anime",
-                releaseNotifications,
-                onReleaseNotificationsChange,
-            )
-            HorizontalDivider(Modifier.padding(vertical = 4.dp), color = MaterialTheme.colorScheme.outline)
-            TextButton(
-                onClick = onMalExport,
-                enabled = !malExportBusy,
-                modifier = Modifier.padding(horizontal = 8.dp).focusHighlight(RoundedCornerShape(8.dp)),
-            ) {
-                Text(if (malExportBusy) "Preparing MyAnimeList export..." else "Export MyAnimeList XML")
-            }
-            malExportMessage?.let { message ->
-                Text(
-                    message,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp),
-                )
-            }
-            TextButton(onClick = LibraryStore::clearHistory, modifier = Modifier.padding(horizontal = 8.dp).focusHighlight(RoundedCornerShape(8.dp))) {
-                Text("Clear viewing history")
-            }
-        }
-    }
-}
-
-@Composable
-private fun SettingSwitch(title: String, description: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().focusHighlight(RoundedCornerShape(9.dp)).clickable { onCheckedChange(!checked) }.padding(horizontal = 14.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-            Text(description, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        Switch(checked, onCheckedChange, Modifier.focusProperties { canFocus = false })
     }
 }
 

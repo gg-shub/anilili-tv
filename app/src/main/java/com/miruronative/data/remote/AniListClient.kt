@@ -55,6 +55,7 @@ class AniListClient(
         status
         averageScore
         popularity
+        isAdult
         genres
         studios(isMain: true) { nodes { name isAnimationStudio } }
         nextAiringEpisode { episode airingAt timeUntilAiring }
@@ -78,7 +79,9 @@ class AniListClient(
         meanScore
         popularity
         favourites
+        isAdult
         genres
+        tags { name rank isMediaSpoiler isGeneralSpoiler }
         studios { nodes { name isAnimationStudio } }
         trailer { id site thumbnail }
         nextAiringEpisode { episode airingAt timeUntilAiring }

@@ -5,22 +5,26 @@ import android.net.Uri
 import android.os.Bundle
 import android.view.View
 import androidx.annotation.OptIn
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -32,6 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -53,6 +58,7 @@ import androidx.media3.ui.PlayerView
 import com.miruronative.data.model.SkipTimes
 import com.miruronative.data.model.StreamItem
 import com.miruronative.data.model.SubtitleItem
+import com.miruronative.data.settings.SettingsStore
 import com.miruronative.playback.PlaybackService
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
 import com.miruronative.ui.nav.Routes
@@ -75,6 +81,7 @@ fun PlayerSurface(
     category: String,
     episode: String,
     onEnded: () -> Unit,
+    onNextEpisode: () -> Unit = onEnded,
     onError: (String) -> Unit,
     modifier: Modifier = Modifier,
     onToggleFullscreen: (() -> Unit)? = null,
@@ -142,11 +149,18 @@ fun PlayerSurface(
             .setMediaMetadata(metadata)
             .apply { if (stream.isHls) setMimeType(MimeTypes.APPLICATION_M3U8) }
             .setSubtitleConfigurations(
-                subtitles.map { subtitle ->
+                subtitles.mapIndexed { index, subtitle ->
                     MediaItem.SubtitleConfiguration.Builder(Uri.parse(subtitle.url))
                         .setMimeType(mimeFor(subtitle.url))
                         .setLanguage(subtitle.language)
                         .setLabel(subtitle.label)
+                        .apply {
+                            // Sub streams carry the original audio, so surface the first
+                            // subtitle track without requiring a manual selection.
+                            if (index == 0 && category != "dub") {
+                                setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                            }
+                        }
                         .build()
                 },
             )
@@ -173,10 +187,48 @@ fun PlayerSurface(
     var settingsExpanded by remember { mutableStateOf(false) }
     var seekFlash by remember { mutableIntStateOf(0) } // -10 / +10, 0 = hidden
     var seekFlashTick by remember { mutableIntStateOf(0) }
+    val autoSkipIntroOutro by SettingsStore.autoSkipIntroOutro.collectAsState()
+    val autoplay by SettingsStore.autoplay.collectAsState()
+    val introStartMs = skip?.introStart?.times(1000)?.toLong() ?: 0L
+    val introEndMs = skip?.introEnd?.times(1000)?.toLong()
+    val outroStartMs = skip?.outroStart?.times(1000)?.toLong()
+    val outroEndMs = skip?.outroEnd?.times(1000)?.toLong()
+    var introAutoSkipped by remember(stream.url, introStartMs, introEndMs) { mutableStateOf(false) }
+    var outroAutoHandled by remember(stream.url, outroStartMs, outroEndMs) { mutableStateOf(false) }
+
     LaunchedEffect(seekFlashTick) {
         if (seekFlash != 0) {
             delay(650)
             seekFlash = 0
+        }
+    }
+
+    LaunchedEffect(
+        autoSkipIntroOutro,
+        autoplay,
+        controller,
+        positionMs,
+        introStartMs,
+        introEndMs,
+        outroStartMs,
+        outroEndMs,
+    ) {
+        val activeController = controller ?: return@LaunchedEffect
+        if (!autoSkipIntroOutro || !activeController.isPlaying) return@LaunchedEffect
+
+        if (!introAutoSkipped && isInSkipWindow(positionMs, introStartMs, introEndMs)) {
+            introAutoSkipped = true
+            activeController.seekTo(introEndMs ?: return@LaunchedEffect)
+            return@LaunchedEffect
+        }
+
+        if (
+            autoplay &&
+            !outroAutoHandled &&
+            isInSkipWindow(positionMs, outroStartMs, outroEndMs)
+        ) {
+            outroAutoHandled = true
+            onNextEpisode()
         }
     }
 
@@ -264,6 +316,8 @@ fun PlayerSurface(
             controller = controller,
             expanded = settingsExpanded && controllerVisible,
             onDismiss = { settingsExpanded = false },
+            autoSkipIntroOutro = autoSkipIntroOutro,
+            onAutoSkipIntroOutroChange = SettingsStore::setAutoSkipIntroOutro,
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(end = 12.dp, bottom = 72.dp),
@@ -273,27 +327,34 @@ fun PlayerSurface(
             CircularProgressIndicator(Modifier.align(Alignment.Center))
         }
 
-        val introStartMs = ((skip?.introStart ?: 0.0) * 1000).toLong()
-        val introEndMs = skip?.introEnd?.times(1000)?.toLong()
-        val outroStartMs = skip?.outroStart?.times(1000)?.toLong()
-        val outroEndMs = skip?.outroEnd?.times(1000)?.toLong()
         val action: Pair<String, () -> Unit>? = when {
             introEndMs != null && positionMs in introStartMs..introEndMs ->
                 "Skip Intro" to { controller?.seekTo(introEndMs); Unit }
             outroStartMs != null && outroEndMs != null && positionMs in outroStartMs..outroEndMs ->
-                "Next Episode" to onEnded
+                "Next Episode" to onNextEpisode
             else -> null
         }
         action?.let { (label, onClick) ->
-            Button(
+            OutlinedButton(
                 onClick = onClick,
+                shape = RoundedCornerShape(3.dp),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.55f)),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    containerColor = Color.Black.copy(alpha = 0.5f),
+                    contentColor = Color.White,
+                ),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                 modifier = Modifier
-                    .align(Alignment.BottomEnd)
+                    .align(Alignment.BottomStart)
                     // Sit above the controller's bottom bar when it is showing so the button
                     // never covers the seek/progress bar.
-                    .padding(end = 24.dp, bottom = if (controllerVisible) 96.dp else 24.dp),
+                    .padding(start = 24.dp, bottom = if (controllerVisible) 96.dp else 24.dp),
             ) {
-                Text(label)
+                Text(
+                    label.uppercase(),
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                )
             }
         }
     }
@@ -306,6 +367,8 @@ private fun PlaybackSettingsMenu(
     controller: MediaController?,
     expanded: Boolean,
     onDismiss: () -> Unit,
+    autoSkipIntroOutro: Boolean,
+    onAutoSkipIntroOutroChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     if (controller == null) return
@@ -345,6 +408,16 @@ private fun PlaybackSettingsMenu(
             }
 
             HorizontalDivider()
+            SectionLabel("Skipping")
+            DropdownMenuItem(
+                text = { Text("Auto-skip intro/outro${if (autoSkipIntroOutro) " ✓" else ""}") },
+                onClick = {
+                    onAutoSkipIntroOutroChange(!autoSkipIntroOutro)
+                    onDismiss()
+                },
+            )
+
+            HorizontalDivider()
             SectionLabel("Playback speed")
             PlaybackSpeeds.forEach { speed ->
                 val selected = abs(controller.playbackParameters.speed - speed) < 0.01f
@@ -357,7 +430,30 @@ private fun PlaybackSettingsMenu(
                 )
             }
 
-            val audioTracks = audioTrackOptions(controller, trackNameProvider)
+            val subtitleTracks = trackOptions(controller, trackNameProvider, C.TRACK_TYPE_TEXT)
+            if (subtitleTracks.isNotEmpty()) {
+                HorizontalDivider()
+                SectionLabel("Subtitles")
+                val subtitlesOff = subtitleTracks.none { it.selected }
+                DropdownMenuItem(
+                    text = { Text(if (subtitlesOff) "Off ✓" else "Off") },
+                    onClick = {
+                        applyTextTrack(controller, null)
+                        onDismiss()
+                    },
+                )
+                subtitleTracks.forEach { option ->
+                    DropdownMenuItem(
+                        text = { Text("${option.name}${if (option.selected) " ✓" else ""}") },
+                        onClick = {
+                            applyTextTrack(controller, option)
+                            onDismiss()
+                        },
+                    )
+                }
+            }
+
+            val audioTracks = trackOptions(controller, trackNameProvider, C.TRACK_TYPE_AUDIO)
             if (audioTracks.isNotEmpty()) {
                 HorizontalDivider()
                 SectionLabel("Audio")
@@ -402,16 +498,17 @@ private fun applyVideoHeight(controller: MediaController, height: Int?) {
     controller.trackSelectionParameters = builder.build()
 }
 
-private fun audioTrackOptions(
+private fun trackOptions(
     controller: MediaController,
     trackNameProvider: DefaultTrackNameProvider,
-): List<AudioTrackOption> = controller.currentTracks.groups
-    .filter { it.type == C.TRACK_TYPE_AUDIO && it.isSupported }
+    trackType: Int,
+): List<TrackOption> = controller.currentTracks.groups
+    .filter { it.type == trackType && it.isSupported }
     .flatMap { group ->
         (0 until group.length)
             .filter { group.isTrackSupported(it) }
             .map { index ->
-                AudioTrackOption(
+                TrackOption(
                     trackGroup = group.getMediaTrackGroup(),
                     trackIndex = index,
                     name = trackNameProvider.getTrackName(group.getTrackFormat(index)),
@@ -420,10 +517,20 @@ private fun audioTrackOptions(
             }
     }
 
-private fun applyAudioTrack(controller: MediaController, option: AudioTrackOption?) {
+private fun applyAudioTrack(controller: MediaController, option: TrackOption?) {
     val builder = controller.trackSelectionParameters.buildUpon()
         .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
         .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
+    if (option != null) {
+        builder.setOverrideForType(TrackSelectionOverride(option.trackGroup, listOf(option.trackIndex)))
+    }
+    controller.trackSelectionParameters = builder.build()
+}
+
+private fun applyTextTrack(controller: MediaController, option: TrackOption?) {
+    val builder = controller.trackSelectionParameters.buildUpon()
+        .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, option == null)
     if (option != null) {
         builder.setOverrideForType(TrackSelectionOverride(option.trackGroup, listOf(option.trackIndex)))
     }
@@ -437,13 +544,19 @@ private fun PlayerView.bindUnifiedSettingsButton(onClick: () -> Unit) {
     }
 }
 
+private fun isInSkipWindow(positionMs: Long, startMs: Long?, endMs: Long?): Boolean {
+    val start = startMs ?: 0L
+    val end = endMs ?: return false
+    return end > start && positionMs in start until end
+}
+
 private fun Float.formatSpeed(): String = if (this % 1f == 0f) {
     "${toInt()}x"
 } else {
     "${this}x"
 }
 
-private data class AudioTrackOption(
+private data class TrackOption(
     val trackGroup: TrackGroup,
     val trackIndex: Int,
     val name: String,

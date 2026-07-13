@@ -40,12 +40,18 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -64,6 +70,7 @@ import com.miruronative.ui.components.AnimeCard
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
 import com.miruronative.ui.adaptive.focusHighlight
 import com.miruronative.ui.components.PullRefreshContainer
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -211,6 +218,7 @@ private fun HeroPager(items: List<Media>, onAnimeClick: (Int) -> Unit, onWatchNo
     if (items.isEmpty()) return
     val device = LocalAppDeviceProfile.current
     val pagerState = rememberPagerState(pageCount = { items.size })
+    val scope = rememberCoroutineScope()
     val heroHeight = when {
         device.isTv -> 420.dp
         device.isExpanded -> 360.dp
@@ -229,7 +237,19 @@ private fun HeroPager(items: List<Media>, onAnimeClick: (Int) -> Unit, onWatchNo
             modifier = Modifier.fillMaxSize(),
             userScrollEnabled = !device.isTv,
         ) { page ->
-            HeroCard(items[page], onAnimeClick, onWatchNow)
+            HeroCard(
+                media = items[page],
+                onAnimeClick = onAnimeClick,
+                onWatchNow = onWatchNow,
+                canGoPrevious = page > 0,
+                canGoNext = page < items.lastIndex,
+                onPrevious = {
+                    scope.launch { pagerState.animateScrollToPage(page - 1) }
+                },
+                onNext = {
+                    scope.launch { pagerState.animateScrollToPage(page + 1) }
+                },
+            )
         }
         Row(
             Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp),
@@ -249,7 +269,15 @@ private fun HeroPager(items: List<Media>, onAnimeClick: (Int) -> Unit, onWatchNo
 }
 
 @Composable
-private fun HeroCard(media: Media, onAnimeClick: (Int) -> Unit, onWatchNow: (Int) -> Unit) {
+private fun HeroCard(
+    media: Media,
+    onAnimeClick: (Int) -> Unit,
+    onWatchNow: (Int) -> Unit,
+    canGoPrevious: Boolean,
+    canGoNext: Boolean,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+) {
     val device = LocalAppDeviceProfile.current
     Box(Modifier.fillMaxSize()) {
         AsyncImage(
@@ -288,14 +316,32 @@ private fun HeroCard(media: Media, onAnimeClick: (Int) -> Unit, onWatchNow: (Int
                 Button(
                     onClick = { onWatchNow(media.id) },
                     colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black),
-                    modifier = Modifier.focusHighlight(RoundedCornerShape(24.dp)),
+                    modifier = Modifier
+                        .onPreviewKeyEvent { event ->
+                            if (device.isTv && canGoPrevious && event.type == KeyEventType.KeyDown && event.key == Key.DirectionLeft) {
+                                onPrevious()
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        .focusHighlight(RoundedCornerShape(24.dp)),
                 ) {
                     Icon(Icons.Default.PlayArrow, contentDescription = null)
                     Text("Play", Modifier.padding(start = 4.dp), fontWeight = FontWeight.Bold)
                 }
                 OutlinedButton(
                     onClick = { onAnimeClick(media.id) },
-                    modifier = Modifier.focusHighlight(RoundedCornerShape(24.dp)),
+                    modifier = Modifier
+                        .onPreviewKeyEvent { event ->
+                            if (device.isTv && canGoNext && event.type == KeyEventType.KeyDown && event.key == Key.DirectionRight) {
+                                onNext()
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        .focusHighlight(RoundedCornerShape(24.dp)),
                 ) {
                     Icon(Icons.Default.Info, contentDescription = null)
                     Text("Details", Modifier.padding(start = 4.dp))

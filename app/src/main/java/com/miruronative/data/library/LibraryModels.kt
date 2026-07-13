@@ -33,3 +33,22 @@ data class WatchlistEntry(
     val averageScore: Int? = null,
     val addedAt: Long = 0,
 )
+
+internal fun mergeWatchlistEntries(
+    local: List<WatchlistEntry>,
+    fromAniList: List<WatchlistEntry>,
+    addedAt: Long = System.currentTimeMillis(),
+): List<WatchlistEntry> {
+    if (fromAniList.isEmpty()) return local
+    val remoteById = fromAniList.associateBy { it.anilistId }
+    val localIds = local.mapTo(mutableSetOf()) { it.anilistId }
+    return buildList {
+        local.forEach { saved ->
+            val remote = remoteById[saved.anilistId]
+            add(remote?.copy(addedAt = saved.addedAt) ?: saved)
+        }
+        fromAniList.forEach { remote ->
+            if (remote.anilistId !in localIds) add(remote.copy(addedAt = addedAt))
+        }
+    }.distinctBy { it.anilistId }
+}

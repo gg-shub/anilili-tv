@@ -224,6 +224,8 @@ private fun WatchContent(
                             url = stream.url,
                             referer = stream.referer,
                             modifier = Modifier.fillMaxSize(),
+                            skip = data.sources.skip,
+                            onNextEpisode = onNext,
                             onFullscreenChanged = onFullscreenChanged,
                             onProgress = onProgress,
                         )
@@ -241,6 +243,7 @@ private fun WatchContent(
                     category = data.category.api,
                     episode = data.current.displayNumber,
                     onEnded = { if (com.miruronative.data.settings.SettingsStore.autoplay.value) onNext() },
+                    onNextEpisode = onNext,
                     onError = onPlaybackError,
                     modifier = Modifier.fillMaxSize(),
                     onToggleFullscreen = onToggleFullscreen,

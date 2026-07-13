@@ -61,6 +61,9 @@ fun AnimeCard(
             media.averageScore?.let { score ->
                 RatingBadge(score, Modifier.align(Alignment.TopStart).padding(5.dp))
             }
+            if (media.isAdult) {
+                AdultBadge(Modifier.align(Alignment.TopEnd).padding(5.dp))
+            }
         }
         Text(
             text = media.title.preferred,
@@ -81,6 +84,20 @@ fun AnimeCard(
             overflow = TextOverflow.Ellipsis,
         )
     }
+}
+
+@Composable
+private fun AdultBadge(modifier: Modifier = Modifier) {
+    Text(
+        "18+",
+        modifier = modifier
+            .clip(RoundedCornerShape(5.dp))
+            .background(MaterialTheme.colorScheme.error)
+            .padding(horizontal = 6.dp, vertical = 3.dp),
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onError,
+        fontWeight = FontWeight.Bold,
+    )
 }
 
 /** Small, high-contrast score treatment shared by every media card presentation. */

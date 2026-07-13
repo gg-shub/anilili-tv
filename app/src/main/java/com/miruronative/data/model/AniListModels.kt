@@ -65,7 +65,9 @@ data class Media(
     val meanScore: Int? = null,
     val popularity: Int? = null,
     val favourites: Int? = null,
+    val isAdult: Boolean = false,
     val genres: List<String> = emptyList(),
+    val tags: List<MediaTag> = emptyList(),
     val studios: StudioConnection = StudioConnection(),
     val nextAiringEpisode: NextAiringEpisode? = null,
     val startDate: FuzzyDate? = null,
@@ -94,6 +96,9 @@ data class MediaTag(
     val description: String? = null,
     val category: String? = null,
     val isAdult: Boolean = false,
+    val rank: Int? = null,
+    val isMediaSpoiler: Boolean = false,
+    val isGeneralSpoiler: Boolean = false,
 )
 
 @Serializable

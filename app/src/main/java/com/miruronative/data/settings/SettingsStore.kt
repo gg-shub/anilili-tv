@@ -39,6 +39,9 @@ object SettingsStore {
     private val _syncSavedToAniList = MutableStateFlow(true)
     val syncSavedToAniList = _syncSavedToAniList.asStateFlow()
 
+    private val _autoSkipIntroOutro = MutableStateFlow(false)
+    val autoSkipIntroOutro = _autoSkipIntroOutro.asStateFlow()
+
     fun init(context: Context) {
         val app = context.applicationContext
         store = PreferenceDataStoreFactory.create(
@@ -63,6 +66,7 @@ object SettingsStore {
     fun setPreferDub(value: Boolean) = save(PREFER_DUB, value, _preferDub)
     fun setReleaseNotifications(value: Boolean) = save(RELEASE_NOTIFICATIONS, value, _releaseNotifications)
     fun setSyncSavedToAniList(value: Boolean) = save(SYNC_SAVED_TO_ANILIST, value, _syncSavedToAniList)
+    fun setAutoSkipIntroOutro(value: Boolean) = save(AUTO_SKIP_INTRO_OUTRO, value, _autoSkipIntroOutro)
 
     private fun save(key: Preferences.Key<Boolean>, value: Boolean, state: MutableStateFlow<Boolean>) {
         state.value = value
@@ -75,6 +79,7 @@ object SettingsStore {
         _preferDub.value = prefs[PREFER_DUB] ?: false
         _releaseNotifications.value = prefs[RELEASE_NOTIFICATIONS] ?: true
         _syncSavedToAniList.value = prefs[SYNC_SAVED_TO_ANILIST] ?: true
+        _autoSkipIntroOutro.value = prefs[AUTO_SKIP_INTRO_OUTRO] ?: false
     }
 
     private suspend fun migrateLegacyPreferences(context: Context) {
@@ -87,6 +92,7 @@ object SettingsStore {
             prefs[PREFER_DUB] = legacy.getBoolean("prefer_dub", false)
             prefs[RELEASE_NOTIFICATIONS] = true
             prefs[SYNC_SAVED_TO_ANILIST] = true
+            prefs[AUTO_SKIP_INTRO_OUTRO] = false
             prefs[MIGRATED] = true
         }
         legacy.edit().clear().apply()
@@ -97,5 +103,6 @@ object SettingsStore {
     private val PREFER_DUB = booleanPreferencesKey("prefer_dub")
     private val RELEASE_NOTIFICATIONS = booleanPreferencesKey("release_notifications")
     private val SYNC_SAVED_TO_ANILIST = booleanPreferencesKey("sync_saved_to_anilist")
+    private val AUTO_SKIP_INTRO_OUTRO = booleanPreferencesKey("auto_skip_intro_outro")
     private val MIGRATED = booleanPreferencesKey("migrated_from_shared_preferences")
 }
