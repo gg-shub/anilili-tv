@@ -5,6 +5,7 @@ import android.app.Application
 import android.os.Build
 import android.os.Process
 import android.os.StrictMode
+import android.os.SystemClock
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.disk.DiskCache
@@ -24,6 +25,14 @@ class MiruroApp : Application(), ImageLoaderFactory {
         super.onCreate()
         DiagnosticsLog.init(this)
         DiagnosticsLog.event("MiruroApp.onCreate start")
+        DiagnosticsLog.installLifecycleCallbacks(this)
+        DiagnosticsLog.startMainThreadWatchdog()
+        DiagnosticsLog.snapshot(this, "MiruroApp.onCreate")
+        DiagnosticsLog.event(
+            "MiruroApp process=${currentProcessName() ?: "unknown"} pid=${Process.myPid()} " +
+                "thread=${Thread.currentThread().name} abis=${Build.SUPPORTED_ABIS.joinToString()}",
+        )
+        DiagnosticsLog.webViewPackage("MiruroApp.onCreate")
         if (isDiagnosticsProcess()) {
             DiagnosticsLog.event("MiruroApp diagnostics process; skipping normal app init")
             return
@@ -36,23 +45,27 @@ class MiruroApp : Application(), ImageLoaderFactory {
                 StrictMode.VmPolicy.Builder().detectLeakedClosableObjects().penaltyLog().build(),
             )
         }
-        DiagnosticsLog.event("CrashReporter.init start")
-        CrashReporter.init(this)
-        DiagnosticsLog.event("AppGraph.init start")
-        AppGraph.init(this)
-        DiagnosticsLog.event("LibraryStore.init start")
-        LibraryStore.init(this)
-        DiagnosticsLog.event("AuthManager.init start")
-        AuthManager.init(this)
-        DiagnosticsLog.event("SettingsStore.init start")
-        SettingsStore.init(this)
-        DiagnosticsLog.event("ReminderManager.init start")
-        ReminderManager.init(this)
-        DiagnosticsLog.event("AutomaticReleaseManager.init start")
-        AutomaticReleaseManager.init(this)
-        DiagnosticsLog.event("ReleaseSyncScheduler.schedule start")
-        ReleaseSyncScheduler.schedule(this)
+        diagnosticsStep("CrashReporter.init") { CrashReporter.init(this) }
+        diagnosticsStep("AppGraph.init") { AppGraph.init(this) }
+        diagnosticsStep("LibraryStore.init") { LibraryStore.init(this) }
+        diagnosticsStep("AuthManager.init") { AuthManager.init(this) }
+        diagnosticsStep("SettingsStore.init") { SettingsStore.init(this) }
+        diagnosticsStep("ReminderManager.init") { ReminderManager.init(this) }
+        diagnosticsStep("AutomaticReleaseManager.init") { AutomaticReleaseManager.init(this) }
+        diagnosticsStep("ReleaseSyncScheduler.schedule") { ReleaseSyncScheduler.schedule(this) }
         DiagnosticsLog.event("MiruroApp.onCreate complete")
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        DiagnosticsLog.event("MiruroApp.onTrimMemory level=$level")
+        DiagnosticsLog.snapshot(this, "trimMemory")
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        DiagnosticsLog.event("MiruroApp.onLowMemory")
+        DiagnosticsLog.snapshot(this, "lowMemory")
     }
 
     override fun newImageLoader(): ImageLoader = ImageLoader.Builder(this)
@@ -70,8 +83,22 @@ class MiruroApp : Application(), ImageLoaderFactory {
         .crossfade(true)
         .build()
 
-    private fun isDiagnosticsProcess(): Boolean {
-        val processName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+    private inline fun diagnosticsStep(name: String, block: () -> Unit) {
+        val startedAt = SystemClock.elapsedRealtime()
+        DiagnosticsLog.event("$name start")
+        try {
+            block()
+            DiagnosticsLog.event("$name complete in ${SystemClock.elapsedRealtime() - startedAt}ms")
+        } catch (throwable: Throwable) {
+            DiagnosticsLog.throwable("$name failed after ${SystemClock.elapsedRealtime() - startedAt}ms", throwable)
+            throw throwable
+        }
+    }
+
+    private fun isDiagnosticsProcess(): Boolean = currentProcessName() == "$packageName:diagnostics"
+
+    private fun currentProcessName(): String? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             Application.getProcessName()
         } else {
             val pid = Process.myPid()
@@ -81,6 +108,4 @@ class MiruroApp : Application(), ImageLoaderFactory {
                 ?.firstOrNull { it.pid == pid }
                 ?.processName
         }
-        return processName == "$packageName:diagnostics"
-    }
 }

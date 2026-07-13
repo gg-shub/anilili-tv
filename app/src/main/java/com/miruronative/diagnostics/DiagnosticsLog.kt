@@ -1,10 +1,21 @@
 package com.miruronative.diagnostics
 
 import android.app.Activity
+import android.app.ActivityManager
+import android.app.Application
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.view.Choreographer
+import android.view.View
+import android.view.ViewTreeObserver
+import android.webkit.WebView
 import androidx.core.content.FileProvider
 import com.miruronative.BuildConfig
 import java.io.File
@@ -13,6 +24,7 @@ import java.io.StringWriter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Small rolling diagnostic log for user-reported "black screen" and startup hangs where no crash
@@ -22,12 +34,15 @@ object DiagnosticsLog {
     private const val LOG_DIR = "diagnostics"
     private const val LOG_FILE = "diagnostics.txt"
     private const val SHARE_FILE = "anilili-diagnostics.txt"
-    private const val MAX_BYTES = 260_000L
-    private const val TRIM_TO_BYTES = 180_000
+    private const val MAX_BYTES = 900_000L
+    private const val TRIM_TO_BYTES = 650_000
 
     private val lock = Any()
     @Volatile private var appContext: Context? = null
     @Volatile private var file: File? = null
+    @Volatile private var lifecycleCallbacksInstalled = false
+    @Volatile private var watchdogStarted = false
+    @Volatile private var lastMainBlockLogAt = 0L
 
     fun init(context: Context) {
         appContext = context.applicationContext
@@ -39,8 +54,149 @@ object DiagnosticsLog {
         )
     }
 
+    fun installLifecycleCallbacks(application: Application) {
+        if (lifecycleCallbacksInstalled) return
+        lifecycleCallbacksInstalled = true
+        application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+                event("lifecycle ${activity.javaClass.simpleName}.created saved=${savedInstanceState != null}")
+            }
+
+            override fun onActivityStarted(activity: Activity) {
+                event("lifecycle ${activity.javaClass.simpleName}.started")
+            }
+
+            override fun onActivityResumed(activity: Activity) {
+                event("lifecycle ${activity.javaClass.simpleName}.resumed")
+            }
+
+            override fun onActivityPaused(activity: Activity) {
+                event("lifecycle ${activity.javaClass.simpleName}.paused")
+            }
+
+            override fun onActivityStopped(activity: Activity) {
+                event("lifecycle ${activity.javaClass.simpleName}.stopped")
+            }
+
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {
+                event("lifecycle ${activity.javaClass.simpleName}.saveInstanceState")
+            }
+
+            override fun onActivityDestroyed(activity: Activity) {
+                event("lifecycle ${activity.javaClass.simpleName}.destroyed finishing=${activity.isFinishing}")
+            }
+        })
+    }
+
+    fun startMainThreadWatchdog() {
+        if (watchdogStarted) return
+        watchdogStarted = true
+        val main = Handler(Looper.getMainLooper())
+        Thread {
+            while (true) {
+                val postedAt = SystemClock.elapsedRealtime()
+                val responded = AtomicBoolean(false)
+                main.post {
+                    responded.set(true)
+                    val delayMs = SystemClock.elapsedRealtime() - postedAt
+                    if (delayMs > 5_000) {
+                        event("main thread recovered after ${delayMs}ms")
+                    }
+                }
+                runCatching { Thread.sleep(6_000) }
+                if (!responded.get()) {
+                    val now = SystemClock.elapsedRealtime()
+                    if (now - lastMainBlockLogAt > 15_000) {
+                        lastMainBlockLogAt = now
+                        append(
+                            buildString {
+                                append(timestamp())
+                                append("  MAIN THREAD BLOCKED >6000ms\n")
+                                append(stackTrace(Looper.getMainLooper().thread))
+                                append('\n')
+                            },
+                        )
+                    }
+                }
+                runCatching { Thread.sleep(2_000) }
+            }
+        }.apply {
+            name = "anilili-diagnostics-watchdog"
+            isDaemon = true
+            start()
+        }
+        event("main thread watchdog started")
+    }
+
+    fun snapshot(context: Context, label: String) {
+        val app = context.applicationContext
+        val activityManager = app.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        val memoryInfo = ActivityManager.MemoryInfo().also { info ->
+            runCatching { activityManager?.getMemoryInfo(info) }
+        }
+        val runtime = Runtime.getRuntime()
+        val configuration = app.resources.configuration
+        event(
+            "$label snapshot " +
+                "orientation=${orientation(configuration)} uiMode=${uiMode(configuration)} " +
+                "fontScale=${configuration.fontScale} " +
+                "screenDp=${configuration.screenWidthDp}x${configuration.screenHeightDp} " +
+                "smallestDp=${configuration.smallestScreenWidthDp} " +
+                "memAvailMb=${memoryInfo.availMem / 1024 / 1024} " +
+                "memLow=${memoryInfo.lowMemory} " +
+                "heapUsedMb=${(runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024} " +
+                "heapMaxMb=${runtime.maxMemory() / 1024 / 1024}",
+        )
+    }
+
+    fun webViewPackage(label: String) {
+        val pkg = runCatching { WebView.getCurrentWebViewPackage() }.getOrNull()
+        event(
+            "$label webviewPackage=" +
+                if (pkg == null) "none" else "${pkg.packageName}/${pkg.versionName} (${pkg.longVersionCodeCompat()})",
+        )
+    }
+
+    fun watchFirstDraw(view: View, label: String, timeoutMs: Long = 5_000) {
+        val startedAt = SystemClock.elapsedRealtime()
+        val drawn = AtomicBoolean(false)
+        view.post {
+            event(
+                "$label decor posted attached=${view.isAttachedToWindow} " +
+                    "shown=${view.isShown} size=${view.width}x${view.height} visibility=${view.visibility}",
+            )
+        }
+        Choreographer.getInstance().postFrameCallback {
+            event("$label first choreographer frame after ${SystemClock.elapsedRealtime() - startedAt}ms")
+        }
+        val listener = object : ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                if (drawn.compareAndSet(false, true)) {
+                    if (view.viewTreeObserver.isAlive) {
+                        view.viewTreeObserver.removeOnPreDrawListener(this)
+                    }
+                    event(
+                        "$label first pre-draw after ${SystemClock.elapsedRealtime() - startedAt}ms " +
+                            "attached=${view.isAttachedToWindow} shown=${view.isShown} size=${view.width}x${view.height}",
+                    )
+                }
+                return true
+            }
+        }
+        view.viewTreeObserver.addOnPreDrawListener(listener)
+        view.postDelayed({
+            if (!drawn.get()) {
+                event(
+                    "$label NO pre-draw after ${timeoutMs}ms " +
+                        "attached=${view.isAttachedToWindow} shown=${view.isShown} size=${view.width}x${view.height} " +
+                        "visibility=${view.visibility} windowFocus=${view.hasWindowFocus()}",
+                )
+            }
+        }, timeoutMs)
+    }
+
     fun event(message: String) {
-        append("${timestamp()}  $message\n")
+        append("${timestamp()} +${SystemClock.elapsedRealtime()}ms  $message\n")
     }
 
     fun throwable(message: String, throwable: Throwable) {
@@ -48,6 +204,9 @@ object DiagnosticsLog {
         append(
             buildString {
                 append(timestamp())
+                append(" +")
+                append(SystemClock.elapsedRealtime())
+                append("ms")
                 append("  ")
                 append(message)
                 append(": ")
@@ -93,6 +252,21 @@ object DiagnosticsLog {
         }
     }
 
+    fun threadStack(message: String, thread: Thread) {
+        append(
+            buildString {
+                append(timestamp())
+                append(" +")
+                append(SystemClock.elapsedRealtime())
+                append("ms  ")
+                append(message)
+                append('\n')
+                append(stackTrace(thread))
+                append('\n')
+            },
+        )
+    }
+
     private fun writeShareSnapshot(context: Context): File {
         val dir = File(context.cacheDir, LOG_DIR).apply { mkdirs() }
         val snapshot = File(dir, SHARE_FILE)
@@ -130,4 +304,26 @@ object DiagnosticsLog {
 
     private fun timestamp(): String =
         SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
+
+    private fun stackTrace(thread: Thread): String =
+        thread.stackTrace.joinToString("\n") { "    at $it" }
+
+    private fun orientation(configuration: Configuration): String = when (configuration.orientation) {
+        Configuration.ORIENTATION_LANDSCAPE -> "landscape"
+        Configuration.ORIENTATION_PORTRAIT -> "portrait"
+        else -> "undefined"
+    }
+
+    private fun uiMode(configuration: Configuration): String = when (
+        configuration.uiMode and Configuration.UI_MODE_TYPE_MASK
+    ) {
+        Configuration.UI_MODE_TYPE_TELEVISION -> "tv"
+        Configuration.UI_MODE_TYPE_CAR -> "car"
+        Configuration.UI_MODE_TYPE_WATCH -> "watch"
+        Configuration.UI_MODE_TYPE_NORMAL -> "normal"
+        else -> "unknown"
+    }
+
+    private fun android.content.pm.PackageInfo.longVersionCodeCompat(): Long =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) longVersionCode else versionCode.toLong()
 }

@@ -9,6 +9,7 @@ import android.os.Looper
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient.CustomViewCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
@@ -52,7 +53,9 @@ import androidx.lifecycle.LifecycleOwner
 import com.miruronative.data.model.SkipTimes
 import com.miruronative.data.settings.SettingsStore
 import com.miruronative.diagnostics.CrashReporter
+import com.miruronative.diagnostics.DiagnosticsLog
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
+import kotlinx.coroutines.delay
 
 /**
  * Renders an embed/iframe provider (or the live site) in a WebView. This is both the player for
@@ -77,6 +80,7 @@ fun EmbedWebView(
     val lifecycleOwner = LocalContext.current.findLifecycleOwner()
     var loadError by remember { mutableStateOf<String?>(null) }
     var webView by remember { mutableStateOf<WebView?>(null) }
+    var finishedUrl by remember(url) { mutableStateOf<String?>(null) }
     val currentOnFullscreenChanged by rememberUpdatedState(onFullscreenChanged)
     val currentOnProgress by rememberUpdatedState(onProgress)
     val currentOnNextEpisode by rememberUpdatedState(onNextEpisode)
@@ -94,6 +98,13 @@ fun EmbedWebView(
     // Registrable-ish host the embed is allowed to navigate within (its own host + subdomains).
     val allowedHost = remember(url) {
         runCatching { Uri.parse(url).host }.getOrNull()?.lowercase()?.removePrefix("www.")
+    }
+    LaunchedEffect(url) {
+        DiagnosticsLog.event("EmbedWebView composed urlHost=${allowedHost ?: "unknown"} refererHost=${referer.hostOrNone()}")
+        delay(10_000)
+        if (finishedUrl == null && loadError == null) {
+            DiagnosticsLog.event("EmbedWebView still loading after 10000ms urlHost=${allowedHost ?: "unknown"}")
+        }
     }
     // Once the embed page has finished loading, the main frame is locked: a real player never
     // navigates its own top frame again, so any later navigation is an ad hijack — including
@@ -128,7 +139,10 @@ fun EmbedWebView(
                 isDialog: Boolean,
                 isUserGesture: Boolean,
                 resultMsg: android.os.Message?,
-            ): Boolean = false
+            ): Boolean {
+                DiagnosticsLog.event("EmbedWebView blocked popup isDialog=$isDialog userGesture=$isUserGesture")
+                return false
+            }
 
             // Android's custom-view fullscreen detaches the page's <video> into a separate
             // surface, and the rotation we trigger right after tears that surface down —
@@ -136,11 +150,13 @@ fun EmbedWebView(
             // Embed pages are full-bleed players already, so fullscreen is implemented by
             // denying the custom view and expanding the WebView natively instead.
             override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
+                DiagnosticsLog.event("EmbedWebView custom fullscreen requested")
                 callback?.onCustomViewHidden()
                 currentOnFullscreenChanged(true)
             }
 
             override fun onHideCustomView() {
+                DiagnosticsLog.event("EmbedWebView custom fullscreen hidden")
                 currentOnFullscreenChanged(false)
             }
         }
@@ -155,21 +171,30 @@ fun EmbedWebView(
                 val host = target.host.orEmpty().lowercase().removePrefix("www.")
                 val allowed = allowedHost != null &&
                     (host == allowedHost || host.endsWith(".$allowedHost"))
+                if (!allowed) DiagnosticsLog.event("EmbedWebView blocked main-frame nav targetHost=$host")
                 return !allowed // block ad redirects that navigate away from the embed
             }
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                 loadError = null
+                finishedUrl = null
+                DiagnosticsLog.event("EmbedWebView page started host=${url.hostOrNone()}")
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 navigationLock.locked = true
+                finishedUrl = url
+                DiagnosticsLog.event("EmbedWebView page finished host=${url.hostOrNone()} title=${view?.title ?: "none"}")
                 view?.evaluateJavascript(PROGRESS_POLL_JS, null)
             }
 
             override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
                 if (request?.isForMainFrame == true) {
                     loadError = error?.description?.toString() ?: "The server did not respond"
+                    DiagnosticsLog.event(
+                        "EmbedWebView main-frame error code=${error?.errorCode} " +
+                            "description=${error?.description} host=${request.url?.host ?: "unknown"}",
+                    )
                 }
             }
 
@@ -180,7 +205,20 @@ fun EmbedWebView(
             ) {
                 if (request?.isForMainFrame == true) {
                     loadError = "HTTP ${errorResponse?.statusCode ?: "error"} from the video server"
+                    DiagnosticsLog.event(
+                        "EmbedWebView main-frame HTTP error status=${errorResponse?.statusCode} " +
+                            "reason=${errorResponse?.reasonPhrase} host=${request.url?.host ?: "unknown"}",
+                    )
                 }
+            }
+
+            override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                DiagnosticsLog.event(
+                    "EmbedWebView render process gone didCrash=${detail?.didCrash()} " +
+                        "priority=${detail?.rendererPriorityAtExit()}",
+                )
+                if (webView === view) webView = null
+                return true
             }
         }
     }
@@ -246,6 +284,8 @@ fun EmbedWebView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
                 try {
+                    DiagnosticsLog.event("EmbedWebView factory create WebView")
+                    DiagnosticsLog.webViewPackage("EmbedWebView factory")
                     WebView(ctx).apply {
                         layoutParams = ViewGroup.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -274,6 +314,7 @@ fun EmbedWebView(
                         webChromeClient = chromeClient
                         if (device.isTv) post { requestFocus() }
                         webView = this
+                        DiagnosticsLog.event("EmbedWebView factory complete userAgent=${settings.userAgentString.take(100)}")
                     }
                 } catch (e: Throwable) {
                     CrashReporter.logNonFatal("System WebView unavailable; embed player disabled", e)
@@ -287,12 +328,14 @@ fun EmbedWebView(
                 if (lastRequestedUrl.value != url) {
                     lastRequestedUrl.value = url
                     navigationLock.locked = false // allow the new embed's own redirect chain
+                    DiagnosticsLog.event("EmbedWebView loadUrl host=${url.hostOrNone()} headers=${headers.keys.joinToString()}")
                     web.loadUrl(url, headers)
                 }
             },
             onRelease = { view ->
                 val web = view as? WebView ?: return@AndroidView
                 if (webView === web) webView = null
+                DiagnosticsLog.event("EmbedWebView release url=${web.url ?: "none"} size=${web.width}x${web.height}")
                 runCatching { web.evaluateJavascript(PAUSE_VIDEO_JS, null) }
                 web.onPause()
                 web.pauseTimers()
@@ -474,3 +517,6 @@ private fun isInSkipWindow(positionMs: Long, startMs: Long?, endMs: Long?): Bool
     val end = endMs ?: return false
     return end > start && positionMs in start until end
 }
+
+private fun String?.hostOrNone(): String =
+    this?.let { runCatching { Uri.parse(it).host }.getOrNull() } ?: "none"

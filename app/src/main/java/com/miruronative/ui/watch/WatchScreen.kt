@@ -62,12 +62,14 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.miruronative.data.ProviderCatalog
 import com.miruronative.data.model.EpisodeItem
+import com.miruronative.diagnostics.DiagnosticsLog
 import com.miruronative.playback.PlaybackService
 import com.miruronative.ui.UiState
 import com.miruronative.ui.components.ErrorBox
 import com.miruronative.ui.components.LoadingBox
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
 import com.miruronative.ui.adaptive.focusHighlight
+import kotlinx.coroutines.delay
 
 @Composable
 fun WatchScreen(
@@ -81,6 +83,7 @@ fun WatchScreen(
     vm: WatchViewModel = viewModel(),
 ) {
     LaunchedEffect(animeId, provider, category, episode) {
+        DiagnosticsLog.event("WatchScreen composed id=$animeId provider=$provider category=$category episode=$episode")
         vm.start(animeId, provider, category, episode)
     }
     val state by vm.state.collectAsState()
@@ -99,7 +102,28 @@ fun WatchScreen(
     }
 
     LaunchedEffect(webFallback) {
+        DiagnosticsLog.event("WatchScreen webFallback=$webFallback")
         if (webFallback) PlaybackService.stopActivePlayback()
+    }
+
+    LaunchedEffect(state, webFallback) {
+        when (val s = state) {
+            is UiState.Loading -> {
+                delay(10_000)
+                if (state is UiState.Loading && !webFallback) {
+                    DiagnosticsLog.event("WatchScreen still loading after 10000ms id=$animeId provider=$provider")
+                }
+            }
+            is UiState.Error -> DiagnosticsLog.event("WatchScreen error visible message=${s.message.take(160)}")
+            is UiState.Success -> {
+                val stream = s.data.chosenStream
+                DiagnosticsLog.event(
+                    "WatchScreen success visible provider=${s.data.provider} episode=${s.data.current.displayNumber} " +
+                        "stream=${stream?.let { if (it.isEmbed) "embed" else if (it.isHls) "hls" else "direct" } ?: "none"} " +
+                        "resolving=${s.data.isResolving}",
+                )
+            }
+        }
     }
 
     // Drive orientation + system bars from the fullscreen flag; restore on leave.

@@ -25,6 +25,7 @@ fun PipeWebView() {
         factory = { ctx ->
             try {
                 DiagnosticsLog.event("PipeWebView factory create WebView start")
+                DiagnosticsLog.webViewPackage("PipeWebView factory")
                 WebView(ctx).also {
                     it.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
                     it.isFocusable = false
@@ -39,7 +40,7 @@ fun PipeWebView() {
         },
         onRelease = { view ->
             val web = view as? WebView ?: return@AndroidView
-            DiagnosticsLog.event("PipeWebView release")
+            DiagnosticsLog.event("PipeWebView release url=${web.url ?: "none"} size=${web.width}x${web.height}")
             PipeBridge.detach(web)
             web.stopLoading()
             web.webChromeClient = null

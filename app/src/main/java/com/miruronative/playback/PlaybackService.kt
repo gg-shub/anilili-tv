@@ -6,6 +6,7 @@ import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.Player
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.cache.CacheDataSource
@@ -15,6 +16,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.CommandButton
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import com.miruronative.diagnostics.DiagnosticsLog
 import com.miruronative.MainActivity
 import com.miruronative.ui.nav.Routes
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -42,6 +44,7 @@ class PlaybackService : MediaSessionService() {
 
     override fun onCreate() {
         super.onCreate()
+        DiagnosticsLog.event("PlaybackService.onCreate")
         httpFactory = DefaultHttpDataSource.Factory()
             .setUserAgent(PLAYER_USER_AGENT)
             .setAllowCrossProtocolRedirects(true)
@@ -67,10 +70,23 @@ class PlaybackService : MediaSessionService() {
                 setHandleAudioBecomingNoisy(true)
                 addListener(object : Player.Listener {
                     override fun onIsPlayingChanged(isPlaying: Boolean) {
+                        DiagnosticsLog.event("PlaybackService player isPlaying=$isPlaying")
                         PlaybackStatus.update(isPlaying)
                     }
 
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        DiagnosticsLog.event("PlaybackService player state=${playbackState.stateName()}")
+                    }
+
+                    override fun onPlayerError(error: PlaybackException) {
+                        DiagnosticsLog.throwable("PlaybackService player error code=${error.errorCodeName}", error)
+                    }
+
                     override fun onMediaItemTransition(mediaItem: androidx.media3.common.MediaItem?, reason: Int) {
+                        DiagnosticsLog.event(
+                            "PlaybackService media transition reason=$reason " +
+                                "mediaId=${mediaItem?.mediaId?.take(120) ?: "none"}",
+                        )
                         if (!::session.isInitialized) return
                         val route = mediaItem?.mediaMetadata?.extras?.getString(EXTRA_WATCH_ROUTE)
                         session.setSessionActivity(sessionActivity(route))
@@ -105,18 +121,22 @@ class PlaybackService : MediaSessionService() {
             override fun hasPreviousMediaItem(): Boolean = episodeNavigator != null
 
             override fun seekToNext() {
+                DiagnosticsLog.event("PlaybackService seekToNext navigator=${episodeNavigator != null}")
                 episodeNavigator?.invoke(1) ?: super.seekToNext()
             }
 
             override fun seekToNextMediaItem() {
+                DiagnosticsLog.event("PlaybackService seekToNextMediaItem navigator=${episodeNavigator != null}")
                 episodeNavigator?.invoke(1) ?: super.seekToNextMediaItem()
             }
 
             override fun seekToPrevious() {
+                DiagnosticsLog.event("PlaybackService seekToPrevious navigator=${episodeNavigator != null}")
                 episodeNavigator?.invoke(-1) ?: super.seekToPrevious()
             }
 
             override fun seekToPreviousMediaItem() {
+                DiagnosticsLog.event("PlaybackService seekToPreviousMediaItem navigator=${episodeNavigator != null}")
                 episodeNavigator?.invoke(-1) ?: super.seekToPreviousMediaItem()
             }
         }
@@ -141,10 +161,12 @@ class PlaybackService : MediaSessionService() {
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession = session
 
     override fun onTaskRemoved(rootIntent: Intent?) {
+        DiagnosticsLog.event("PlaybackService.onTaskRemoved playing=${if (::player.isInitialized) player.playWhenReady else false}")
         if (!::player.isInitialized || !player.playWhenReady || player.mediaItemCount == 0) stopSelf()
     }
 
     override fun onDestroy() {
+        DiagnosticsLog.event("PlaybackService.onDestroy")
         activeHttpFactory = null
         activePlayer = null
         episodeNavigator = null
@@ -188,6 +210,7 @@ class PlaybackService : MediaSessionService() {
 
         /** Used when switching explicitly from native playback to a provider WebView. */
         fun stopActivePlayback() {
+            DiagnosticsLog.event("PlaybackService.stopActivePlayback")
             activePlayer?.run {
                 stop()
                 clearMediaItems()
@@ -196,6 +219,7 @@ class PlaybackService : MediaSessionService() {
 
         /** Pause playback when the app is backgrounded while keeping the current media loaded. */
         fun pauseActivePlayback() {
+            DiagnosticsLog.event("PlaybackService.pauseActivePlayback")
             activePlayer?.pause()
         }
 
@@ -208,6 +232,15 @@ class PlaybackService : MediaSessionService() {
             activeHttpFactory?.setDefaultRequestProperties(
                 mapOf("Referer" to safeReferer, "Origin" to origin),
             )
+            DiagnosticsLog.event("PlaybackService.configureRequestHeaders refererHost=${android.net.Uri.parse(safeReferer).host ?: "unknown"}")
         }
     }
+}
+
+private fun Int.stateName(): String = when (this) {
+    Player.STATE_IDLE -> "IDLE"
+    Player.STATE_BUFFERING -> "BUFFERING"
+    Player.STATE_READY -> "READY"
+    Player.STATE_ENDED -> "ENDED"
+    else -> toString()
 }

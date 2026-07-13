@@ -8,6 +8,7 @@ import android.content.res.Configuration
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.view.View
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -98,6 +99,13 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
         )
         super.onCreate(savedInstanceState)
+        DiagnosticsLog.snapshot(this, "MainActivity.afterSuper")
+        DiagnosticsLog.event(
+            "MainActivity intent action=${intent.action ?: "none"} " +
+                "data=${intent.dataString ?: "none"} categories=${intent.categories?.joinToString() ?: "none"} " +
+                "routeExtra=${intent.getStringExtra(Routes.EXTRA_ROUTE) ?: "none"}",
+        )
+        DiagnosticsLog.watchFirstDraw(window.decorView, "MainActivity")
         pendingRoute = intent.getStringExtra(Routes.EXTRA_ROUTE)
         DiagnosticsLog.event("MainActivity pendingRoute=${pendingRoute ?: "none"}")
         handleAuthRedirect(intent)
@@ -127,8 +135,16 @@ class MainActivity : ComponentActivity() {
             }
         }
         DiagnosticsLog.event("MainActivity.setContent complete")
+        window.decorView.post {
+            DiagnosticsLog.event(
+                "MainActivity decor after setContent attached=${window.decorView.isAttachedToWindow} " +
+                    "shown=${window.decorView.isShown} size=${window.decorView.width}x${window.decorView.height} " +
+                    "visibility=${window.decorView.visibilityName()} focus=${window.decorView.hasWindowFocus()}",
+            )
+        }
         lifecycleScope.launch {
             PlaybackStatus.isPlaying.collect { playing ->
+                DiagnosticsLog.event("PlaybackStatus.isPlaying=$playing")
                 if (playing) {
                     window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 } else {
@@ -138,11 +154,30 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        DiagnosticsLog.event("MainActivity.onStart")
+    }
+
+    override fun onResume() {
+        super.onResume()
+        DiagnosticsLog.event("MainActivity.onResume")
+        DiagnosticsLog.snapshot(this, "MainActivity.onResume")
+    }
+
+    override fun onPause() {
+        super.onPause()
+        DiagnosticsLog.event("MainActivity.onPause")
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         pendingRoute = intent.getStringExtra(Routes.EXTRA_ROUTE)
-        DiagnosticsLog.event("MainActivity.onNewIntent pendingRoute=${pendingRoute ?: "none"}")
+        DiagnosticsLog.event(
+            "MainActivity.onNewIntent pendingRoute=${pendingRoute ?: "none"} " +
+                "action=${intent.action ?: "none"} data=${intent.dataString ?: "none"}",
+        )
         handleAuthRedirect(intent)
     }
 
@@ -164,6 +199,27 @@ class MainActivity : ComponentActivity() {
         PlaybackService.pauseActivePlayback()
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        DiagnosticsLog.event("MainActivity.onDestroy finishing=$isFinishing changingConfigurations=$isChangingConfigurations")
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        DiagnosticsLog.event(
+            "MainActivity.onWindowFocusChanged hasFocus=$hasFocus " +
+                "decorShown=${window.decorView.isShown} size=${window.decorView.width}x${window.decorView.height}",
+        )
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        DiagnosticsLog.event(
+            "MainActivity.onConfigurationChanged orientation=${newConfig.orientation} " +
+                "screenDp=${newConfig.screenWidthDp}x${newConfig.screenHeightDp} uiMode=${newConfig.uiMode}",
+        )
+    }
+
     override fun onPictureInPictureModeChanged(
         isInPictureInPictureMode: Boolean,
         newConfig: Configuration,
@@ -173,6 +229,13 @@ class MainActivity : ComponentActivity() {
         DiagnosticsLog.event("PictureInPicture changed active=$isInPictureInPictureMode")
     }
 
+}
+
+private fun View.visibilityName(): String = when (visibility) {
+    View.VISIBLE -> "visible"
+    View.INVISIBLE -> "invisible"
+    View.GONE -> "gone"
+    else -> visibility.toString()
 }
 
 private enum class Tab(val route: String, val label: String, val icon: ImageVector) {
@@ -194,6 +257,13 @@ private fun MiruroRoot(
     val backStack by nav.currentBackStackEntryAsState()
     val currentRoute = backStack?.destination?.route
     val showBottomBar = currentRoute in Routes.tabRoutes
+
+    LaunchedEffect(Unit) {
+        DiagnosticsLog.event(
+            "MiruroRoot composed formFactor=${deviceProfile.formFactor} " +
+                "widthDp=${deviceProfile.widthDp} navRail=${deviceProfile.useNavigationRail}",
+        )
+    }
 
     LaunchedEffect(currentRoute) {
         DiagnosticsLog.event("Nav route=${currentRoute ?: "none"}")
@@ -349,6 +419,7 @@ private fun AppNavHost(
         modifier = modifier,
     ) {
             composable(Routes.HOME) {
+                LaunchedEffect(Unit) { DiagnosticsLog.event("Route HOME content entered") }
                 HomeScreen(
                     onAnimeClick = { id -> nav.navigate(Routes.detail(id)) },
                     onWatchNow = { id ->
@@ -362,18 +433,22 @@ private fun AppNavHost(
                 )
             }
             composable(Routes.NOTIFICATIONS) {
+                LaunchedEffect(Unit) { DiagnosticsLog.event("Route NOTIFICATIONS content entered") }
                 NotificationsScreen(
                     onBack = { nav.popBackStack() },
                     onAnimeClick = { id -> nav.navigate(Routes.detail(id)) },
                 )
             }
             composable(Routes.SEARCH) {
+                LaunchedEffect(Unit) { DiagnosticsLog.event("Route SEARCH content entered") }
                 SearchScreen(onAnimeClick = { id -> nav.navigate(Routes.detail(id)) })
             }
             composable(Routes.SCHEDULE) {
+                LaunchedEffect(Unit) { DiagnosticsLog.event("Route SCHEDULE content entered") }
                 ScheduleScreen(onAnimeClick = { id -> nav.navigate(Routes.detail(id)) })
             }
             composable(Routes.MORE) {
+                LaunchedEffect(Unit) { DiagnosticsLog.event("Route MORE content entered") }
                 ProfileScreen(
                     onAnimeClick = { id -> nav.navigate(Routes.detail(id)) },
                     onResume = { e ->
@@ -382,6 +457,7 @@ private fun AppNavHost(
                 )
             }
             composable(Routes.SETTINGS) {
+                LaunchedEffect(Unit) { DiagnosticsLog.event("Route SETTINGS content entered") }
                 SettingsScreen()
             }
 
@@ -390,6 +466,7 @@ private fun AppNavHost(
                 arguments = listOf(navArgument(Routes.Arg.ID) { type = NavType.IntType }),
             ) { entry ->
                 val id = entry.arguments?.getInt(Routes.Arg.ID) ?: return@composable
+                LaunchedEffect(id) { DiagnosticsLog.event("Route DETAIL content entered id=$id") }
                 DetailScreen(
                     animeId = id,
                     onBack = { nav.popBackStack() },
@@ -409,11 +486,21 @@ private fun AppNavHost(
                 ),
             ) { entry ->
                 val args = entry.arguments ?: return@composable
+                val watchId = args.getInt(Routes.Arg.ID)
+                val watchProvider = args.getString(Routes.Arg.PROVIDER).orEmpty()
+                val watchCategory = args.getString(Routes.Arg.CATEGORY).orEmpty()
+                val watchEpisode = args.getString(Routes.Arg.EPISODE).orEmpty()
+                LaunchedEffect(watchId, watchProvider, watchCategory, watchEpisode) {
+                    DiagnosticsLog.event(
+                        "Route WATCH content entered id=$watchId provider=$watchProvider " +
+                            "category=$watchCategory episode=$watchEpisode",
+                    )
+                }
                 WatchScreen(
-                    animeId = args.getInt(Routes.Arg.ID),
-                    provider = args.getString(Routes.Arg.PROVIDER).orEmpty(),
-                    category = args.getString(Routes.Arg.CATEGORY).orEmpty(),
-                    episode = args.getString(Routes.Arg.EPISODE).orEmpty(),
+                    animeId = watchId,
+                    provider = watchProvider,
+                    category = watchCategory,
+                    episode = watchEpisode,
                     inPictureInPicture = inPictureInPicture,
                     onBack = { nav.popBackStack() },
                     onAnimeDetails = {

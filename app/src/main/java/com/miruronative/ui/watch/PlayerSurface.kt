@@ -64,6 +64,7 @@ import com.miruronative.data.model.SkipTimes
 import com.miruronative.data.model.StreamItem
 import com.miruronative.data.model.SubtitleItem
 import com.miruronative.data.settings.SettingsStore
+import com.miruronative.diagnostics.DiagnosticsLog
 import com.miruronative.playback.PlaybackService
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
 import com.miruronative.ui.nav.Routes
@@ -106,10 +107,26 @@ fun PlayerSurface(
 
     DisposableEffect(controllerFuture) {
         controllerFuture.addListener(
-            { controller = runCatching { controllerFuture.get() }.getOrNull() },
+            {
+                runCatching { controllerFuture.get() }
+                    .onSuccess {
+                        DiagnosticsLog.event("PlayerSurface MediaController connected")
+                        controller = it
+                    }
+                    .onFailure { DiagnosticsLog.throwable("PlayerSurface MediaController connection failed", it) }
+            },
             ContextCompat.getMainExecutor(context),
         )
         onDispose { MediaController.releaseFuture(controllerFuture) }
+    }
+
+    LaunchedEffect(controller) {
+        if (controller == null) {
+            delay(5_000)
+            if (controller == null) {
+                DiagnosticsLog.event("PlayerSurface controller still null after 5000ms")
+            }
+        }
     }
 
     DisposableEffect(controller) {
@@ -119,13 +136,23 @@ fun PlayerSurface(
         } else {
             val listener = object : Player.Listener {
                 override fun onPlaybackStateChanged(playbackState: Int) {
+                    DiagnosticsLog.event(
+                        "PlayerSurface playbackState=${playbackState.stateName()} " +
+                            "mediaId=${activeController.currentMediaItem?.mediaId?.take(120) ?: "none"}",
+                    )
                     if (playbackState == Player.STATE_ENDED) onEnded()
                 }
 
+                override fun onIsPlayingChanged(isPlaying: Boolean) {
+                    DiagnosticsLog.event("PlayerSurface isPlaying=$isPlaying")
+                }
+
                 override fun onPlayerError(error: PlaybackException) {
+                    DiagnosticsLog.throwable("PlayerSurface player error code=${error.errorCodeName}", error)
                     onError(error.localizedMessage ?: "Playback failed")
                 }
             }
+            DiagnosticsLog.event("PlayerSurface listener attached")
             activeController.addListener(listener)
             onDispose {
                 onProgress?.invoke(
@@ -133,14 +160,22 @@ fun PlayerSurface(
                     activeController.duration.coerceAtLeast(0),
                 )
                 activeController.removeListener(listener)
+                DiagnosticsLog.event("PlayerSurface listener removed")
             }
         }
     }
 
     LaunchedEffect(controller, stream.url, subtitles) {
         val activeController = controller ?: return@LaunchedEffect
-        if (activeController.currentMediaItem?.mediaId == stream.url) return@LaunchedEffect
+        if (activeController.currentMediaItem?.mediaId == stream.url) {
+            DiagnosticsLog.event("PlayerSurface media item already active host=${stream.host()} type=${stream.typeLabel()}")
+            return@LaunchedEffect
+        }
 
+        DiagnosticsLog.event(
+            "PlayerSurface prepare stream type=${stream.typeLabel()} host=${stream.host()} " +
+                "height=${stream.height ?: "auto"} subtitles=${subtitles.size} startMs=$startPositionMs",
+        )
         PlaybackService.configureRequestHeaders(stream.referer)
         val watchRoute = Routes.watch(animeId, provider, category, episode)
         val metadata = MediaMetadata.Builder()
@@ -177,6 +212,7 @@ fun PlayerSurface(
         activeController.setMediaItem(item, startPositionMs.coerceAtLeast(0))
         activeController.prepare()
         activeController.playWhenReady = true
+        DiagnosticsLog.event("PlayerSurface prepare called playWhenReady=true")
     }
 
     var positionMs by remember { mutableLongStateOf(0L) }
@@ -201,13 +237,18 @@ fun PlayerSurface(
     // Bridges the media session's next/previous commands (controller buttons, notification,
     // hardware media keys) into the episode-resolution flow while this screen is visible.
     DisposableEffect(Unit) {
+        DiagnosticsLog.event("PlayerSurface episode navigator registered hasPrev=$hasPreviousEpisode hasNext=$hasNextEpisode")
         PlaybackService.episodeNavigator = { direction ->
+            DiagnosticsLog.event("PlayerSurface episode navigator direction=$direction")
             when {
                 direction > 0 && currentHasNext -> currentOnNextEpisode()
                 direction < 0 && currentHasPrevious -> currentOnPreviousEpisode?.invoke()
             }
         }
-        onDispose { PlaybackService.episodeNavigator = null }
+        onDispose {
+            PlaybackService.episodeNavigator = null
+            DiagnosticsLog.event("PlayerSurface episode navigator cleared")
+        }
     }
     var settingsExpanded by remember { mutableStateOf(false) }
     var seekFlash by remember { mutableIntStateOf(0) } // -10 / +10, 0 = hidden
@@ -260,6 +301,7 @@ fun PlayerSurface(
     Box(modifier) {
         AndroidView(
             factory = { ctx ->
+                DiagnosticsLog.event("PlayerSurface AndroidView factory create PlayerView")
                 PlayerView(ctx).apply {
                     player = controller
                     useController = true
@@ -299,10 +341,15 @@ fun PlayerSurface(
             update = {
                 it.player = controller
                 it.bindUnifiedSettingsButton { settingsExpanded = true }
+                DiagnosticsLog.event(
+                    "PlayerSurface AndroidView update controller=${controller != null} " +
+                        "size=${it.width}x${it.height} shown=${it.isShown}",
+                )
             },
             onRelease = {
                 it.player = null
                 playerView = null
+                DiagnosticsLog.event("PlayerSurface AndroidView release size=${it.width}x${it.height}")
             },
             modifier = Modifier.fillMaxSize(),
         )
@@ -607,6 +654,23 @@ private data class TrackOption(
 )
 
 private val PlaybackSpeeds = listOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
+
+private fun Int.stateName(): String = when (this) {
+    Player.STATE_IDLE -> "IDLE"
+    Player.STATE_BUFFERING -> "BUFFERING"
+    Player.STATE_READY -> "READY"
+    Player.STATE_ENDED -> "ENDED"
+    else -> toString()
+}
+
+private fun StreamItem.typeLabel(): String = when {
+    isEmbed -> "embed"
+    isHls -> "hls"
+    else -> "direct"
+}
+
+private fun StreamItem.host(): String =
+    runCatching { Uri.parse(url).host }.getOrNull() ?: "unknown"
 
 private fun mimeFor(url: String): String = when {
     url.contains(".vtt", ignoreCase = true) -> MimeTypes.TEXT_VTT
