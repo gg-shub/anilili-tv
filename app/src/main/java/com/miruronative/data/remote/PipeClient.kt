@@ -154,6 +154,10 @@ class PipeClient(
         val subsArr = (root["subtitles"] as? JsonArray) ?: (root["captions"] as? JsonArray)
         val subtitles = subsArr?.mapNotNull { el ->
             val o = el as? JsonObject ?: return@mapNotNull null
+            val kind = o.str("kind")
+            if (kind != null && !kind.equals("captions", true) && !kind.equals("subtitles", true)) {
+                return@mapNotNull null
+            }
             val url = o.str("url") ?: o.str("file") ?: return@mapNotNull null
             SubtitleItem(
                 url = url,

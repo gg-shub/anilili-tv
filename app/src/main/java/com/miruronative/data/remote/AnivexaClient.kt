@@ -147,8 +147,12 @@ class AnivexaClient(
             }
             (source?.get("tracks") as? JsonArray).orEmpty().forEach { track ->
                 val obj = track as? JsonObject ?: return@forEach
+                val kind = obj.string("kind")?.lowercase()
+                if (kind != null && kind != "captions" && kind != "subtitles") return@forEach
                 val file = obj.string("file") ?: return@forEach
-                subtitles += SubtitleItem(file, obj.string("label") ?: "Subtitle", language(obj.string("label")))
+                val item = SubtitleItem(file, obj.string("label") ?: "Subtitle", language(obj.string("label")))
+                val isDefault = (obj["default"] as? JsonPrimitive)?.booleanOrNull == true
+                if (isDefault) subtitles.add(0, item) else subtitles += item
             }
             skip = skipTimes(source) ?: skip
         }
@@ -296,7 +300,12 @@ class AnivexaClient(
         val streams = links.mapNotNull { link ->
             val kind = link.string("dataType")?.lowercase() ?: return@mapNotNull null
             if (kind !in accepted) return@mapNotNull null
-            val url = link.string("dataLink") ?: return@mapNotNull null
+            var url = link.string("dataLink") ?: return@mapNotNull null
+            // ReAnime serves dual-audio embeds: sub and dub share one URL and the site
+            // selects the English track by appending a=1 (audio track index).
+            if (audio == "dub" && !url.contains(Regex("""[?&]a="""))) {
+                url += if ('?' in url) "&a=1" else "?a=1"
+            }
             stream(url, "embed", link.string("serverName") ?: "ReAnime", "$base/", active = false)
         }.distinctBy { it.url }.mapIndexed { index, item -> item.copy(isActive = index == 0) }
         return SourcesResult(streams, emptyList(), skipTimes(watch), null)
@@ -390,6 +399,12 @@ class AnivexaClient(
             NativeProviderParsers.hlsUrls(embedHtml).forEach { url ->
                 streams += stream(NativeProviderParsers.absoluteUrl(base, url), "hls", server, embed, streams.isEmpty())
             }
+            // AnimeGG serves progressive MP4s through jwplayer (`file: "/play/.../video.mp4?for=..."`).
+            Regex("""file:\s*["']([^"']+\.mp4[^"']*)["']""", RegexOption.IGNORE_CASE)
+                .findAll(embedHtml).forEach { match ->
+                    val url = NativeProviderParsers.absoluteUrl(base, match.groupValues[1])
+                    streams += stream(url, "video", server, embed, streams.isEmpty())
+                }
             streams += stream(embed, "embed", "$server embed", embed, streams.isEmpty() && index == 0)
         }
         return SourcesResult(streams.distinctBy { it.url }, emptyList(), null, null)
@@ -421,14 +436,39 @@ class AnivexaClient(
                 }
             }
         val streams = mutableListOf<StreamItem>()
+        val subtitles = mutableListOf<SubtitleItem>()
         embeds.distinct().take(4).forEachIndexed { index, embed ->
             val embedHtml = runCatching { getText(embed, mapOf("Referer" to "$base/")) }.getOrDefault("")
             NativeProviderParsers.hlsUrls(embedHtml).forEach { hls ->
                 streams += stream(hls, "hls", "AniNeko", embed, streams.isEmpty())
             }
+            subtitles += embedQuerySubtitles(embed)
             streams += stream(embed, "embed", "AniNeko embed", embed, streams.isEmpty() && index == 0)
         }
-        return SourcesResult(streams.distinctBy { it.url }, emptyList(), null, null)
+        return SourcesResult(streams.distinctBy { it.url }, subtitles.distinctBy { it.url }, null, null)
+    }
+
+    /**
+     * AniNeko softsub servers pass their subtitle tracks to the embed player through the URL
+     * (`?sub=<vtt>` or `?caption_1=<vtt>&sub_1=English`); recover them for native playback.
+     */
+    private fun embedQuerySubtitles(embedUrl: String): List<SubtitleItem> {
+        val query = embedUrl.substringAfter('?', "")
+        if (query.isBlank()) return emptyList()
+        val params = query.split('&').mapNotNull { part ->
+            val idx = part.indexOf('=')
+            if (idx <= 0) null else part.substring(0, idx) to part.substring(idx + 1)
+        }
+        val byName = params.toMap()
+        return params.mapNotNull { (key, value) ->
+            if (!value.startsWith("http")) return@mapNotNull null
+            val label = when {
+                key == "sub" -> "English"
+                key.startsWith("caption") -> byName["sub${key.removePrefix("caption")}"] ?: "Subtitle"
+                else -> return@mapNotNull null
+            }
+            SubtitleItem(value, label, language(label))
+        }
     }
 
     // ---- 2Dhive ---------------------------------------------------------------------------

@@ -233,6 +233,8 @@ class WatchViewModel : ViewModel() {
 
     private fun pickStream(sources: SourcesResult): StreamItem? =
         sources.hlsStreams.maxByOrNull { (it.height ?: 0) + if (it.isActive) 100_000 else 0 }
+            // Any other direct stream (progressive MP4) still beats a WebView embed.
+            ?: sources.streams.firstOrNull { !it.isEmbed }
             ?: sources.embedStreams.firstOrNull()
             ?: sources.streams.firstOrNull()
 

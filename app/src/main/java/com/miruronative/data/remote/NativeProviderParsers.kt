@@ -27,12 +27,16 @@ internal object NativeProviderParsers {
 
     fun attr(tag: String, name: String): String {
         val escaped = Regex.escape(name)
-        return Regex("\\b$escaped\\s*=\\s*([\"'])(.*?)\\1", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+        val quoted = Regex("\\b$escaped\\s*=\\s*([\"'])(.*?)\\1", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
             .find(tag)
             ?.groupValues
             ?.get(2)
-            ?.let(::decodeEntities)
-            .orEmpty()
+        // Some providers (e.g. AniZone) emit unquoted attribute values.
+        val raw = quoted ?: Regex("\\b$escaped\\s*=\\s*([^\"'\\s>]+)", RegexOption.IGNORE_CASE)
+            .find(tag)
+            ?.groupValues
+            ?.get(1)
+        return raw?.let(::decodeEntities).orEmpty()
     }
 
     fun stripTags(html: String): String = decodeEntities(
