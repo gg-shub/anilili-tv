@@ -76,6 +76,7 @@ fun SettingsScreen(
     val autoSync by SettingsStore.autoSyncAniList.collectAsState()
     val preferDub by SettingsStore.preferDub.collectAsState()
     val releaseNotifications by SettingsStore.releaseNotifications.collectAsState()
+    val hideAdultContent by SettingsStore.hideAdultContent.collectAsState()
     val syncSavedToAniList by SettingsStore.syncSavedToAniList.collectAsState()
     val updateState by UpdateManager.state.collectAsState()
     val profile = (profileState as? UiState.Success<AniListProfile>)?.data
@@ -176,6 +177,17 @@ fun SettingsScreen(
             item { SettingSwitch("Autoplay next episode", "Continue automatically", autoplay, SettingsStore::setAutoplay) }
             item { SettingSwitch("Auto-skip intro and outro", "Use provider skip times when available", autoSkip, SettingsStore::setAutoSkipIntroOutro) }
             item { SettingSwitch("Prefer dubbed audio", "Use dub first when available", preferDub, SettingsStore::setPreferDub) }
+            item { SectionDivider() }
+
+            item { SettingsSectionTitle("Content") }
+            item {
+                SettingSwitch(
+                    "Hide adult content",
+                    "Keep hentai out of Home, Search, Browse, and Schedule",
+                    hideAdultContent,
+                    SettingsStore::setHideAdultContent,
+                )
+            }
             item { SectionDivider() }
 
             item { SettingsSectionTitle("AniList") }

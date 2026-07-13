@@ -42,6 +42,9 @@ object SettingsStore {
     private val _autoSkipIntroOutro = MutableStateFlow(false)
     val autoSkipIntroOutro = _autoSkipIntroOutro.asStateFlow()
 
+    private val _hideAdultContent = MutableStateFlow(true)
+    val hideAdultContent = _hideAdultContent.asStateFlow()
+
     fun init(context: Context) {
         val app = context.applicationContext
         store = PreferenceDataStoreFactory.create(
@@ -67,6 +70,7 @@ object SettingsStore {
     fun setReleaseNotifications(value: Boolean) = save(RELEASE_NOTIFICATIONS, value, _releaseNotifications)
     fun setSyncSavedToAniList(value: Boolean) = save(SYNC_SAVED_TO_ANILIST, value, _syncSavedToAniList)
     fun setAutoSkipIntroOutro(value: Boolean) = save(AUTO_SKIP_INTRO_OUTRO, value, _autoSkipIntroOutro)
+    fun setHideAdultContent(value: Boolean) = save(HIDE_ADULT_CONTENT, value, _hideAdultContent)
 
     private fun save(key: Preferences.Key<Boolean>, value: Boolean, state: MutableStateFlow<Boolean>) {
         state.value = value
@@ -80,6 +84,7 @@ object SettingsStore {
         _releaseNotifications.value = prefs[RELEASE_NOTIFICATIONS] ?: true
         _syncSavedToAniList.value = prefs[SYNC_SAVED_TO_ANILIST] ?: true
         _autoSkipIntroOutro.value = prefs[AUTO_SKIP_INTRO_OUTRO] ?: false
+        _hideAdultContent.value = prefs[HIDE_ADULT_CONTENT] ?: true
     }
 
     private suspend fun migrateLegacyPreferences(context: Context) {
@@ -104,5 +109,6 @@ object SettingsStore {
     private val RELEASE_NOTIFICATIONS = booleanPreferencesKey("release_notifications")
     private val SYNC_SAVED_TO_ANILIST = booleanPreferencesKey("sync_saved_to_anilist")
     private val AUTO_SKIP_INTRO_OUTRO = booleanPreferencesKey("auto_skip_intro_outro")
+    private val HIDE_ADULT_CONTENT = booleanPreferencesKey("hide_adult_content")
     private val MIGRATED = booleanPreferencesKey("migrated_from_shared_preferences")
 }

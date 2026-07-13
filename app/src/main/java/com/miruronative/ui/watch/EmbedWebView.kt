@@ -99,6 +99,13 @@ fun EmbedWebView(
     val allowedHost = remember(url) {
         runCatching { Uri.parse(url).host }.getOrNull()?.lowercase()?.removePrefix("www.")
     }
+    // Once the embed page has finished loading, the main frame is locked: a real player never
+    // navigates its own top frame again, so any later navigation is an ad hijack — including
+    // same-host popunder gateways that the host allowlist alone would let through.
+    val navigationLock = remember { object { @Volatile var locked = false } }
+    // Compare against the URL we last requested, not WebView.url: pages rewrite their own URL
+    // (history.replaceState), which would otherwise re-trigger loadUrl on every recomposition.
+    val lastRequestedUrl = remember { object { var value: String? = null } }
 
     // Called from the WebView's JS bridge thread while the page's accessible <video> plays.
     val progressBridge = remember(mainHandler) {
@@ -118,6 +125,15 @@ fun EmbedWebView(
 
     val chromeClient = remember {
         object : WebChromeClient() {
+            // With multiple windows enabled, window.open lands here instead of navigating the
+            // main frame. Returning false swallows the popunder without disturbing playback.
+            override fun onCreateWindow(
+                view: WebView?,
+                isDialog: Boolean,
+                isUserGesture: Boolean,
+                resultMsg: android.os.Message?,
+            ): Boolean = false
+
             override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
                 if (view == null) {
                     callback?.onCustomViewHidden()
@@ -144,11 +160,12 @@ fun EmbedWebView(
         }
     }
 
-    val webClient = remember(allowedHost) {
+    val webClient = remember(allowedHost, navigationLock) {
         object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 val target = request?.url ?: return true
                 if (!request.isForMainFrame) return false
+                if (navigationLock.locked) return true // page is up; any top-frame nav is an ad
                 val host = target.host.orEmpty().lowercase().removePrefix("www.")
                 val allowed = allowedHost != null &&
                     (host == allowedHost || host.endsWith(".$allowedHost"))
@@ -160,6 +177,7 @@ fun EmbedWebView(
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
+                navigationLock.locked = true
                 view?.evaluateJavascript(PROGRESS_POLL_JS, null)
             }
 
@@ -273,6 +291,10 @@ fun EmbedWebView(
                             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                             allowFileAccess = false
                             allowContentAccess = false
+                            // Route window.open through onCreateWindow (dropped there) instead
+                            // of letting popunders replace the player in the main frame.
+                            setSupportMultipleWindows(true)
+                            javaScriptCanOpenWindowsAutomatically = false
                             userAgentString = userAgentString.replace("; wv", "") // look less like a webview
                         }
                         addJavascriptInterface(progressBridge, "AniliProgress")
@@ -290,7 +312,11 @@ fun EmbedWebView(
                 val web = view as? WebView ?: return@AndroidView
                 web.webViewClient = webClient
                 val headers = referer?.let { mapOf("Referer" to it) } ?: emptyMap()
-                if (web.url != url) web.loadUrl(url, headers)
+                if (lastRequestedUrl.value != url) {
+                    lastRequestedUrl.value = url
+                    navigationLock.locked = false // allow the new embed's own redirect chain
+                    web.loadUrl(url, headers)
+                }
             },
             onRelease = { view ->
                 val web = view as? WebView ?: return@AndroidView

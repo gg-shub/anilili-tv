@@ -12,6 +12,7 @@ import com.miruronative.data.model.DiscoverOptions
 import com.miruronative.data.remote.AniListClient
 import com.miruronative.data.remote.AnivexaClient
 import com.miruronative.data.remote.PipeClient
+import com.miruronative.data.settings.SettingsStore
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.builtins.ListSerializer
@@ -27,24 +28,27 @@ class MiruroRepository(
     private val anivexa: AnivexaClient,
     private val cache: AppCache,
 ) {
+    /** User preference: keep hentai out of every browsing surface. */
+    private val hideAdult: Boolean get() = SettingsStore.hideAdultContent.value
+
     // ---- discovery (AniList) ----
     suspend fun trending(page: Int = 1, force: Boolean = false): MediaPage = mediaPage("trending:$page", COLLECTION_TTL, force) {
-        aniList.collection("TRENDING_DESC", page = page, perPage = 30)
+        aniList.collection("TRENDING_DESC", page = page, perPage = 30, hideAdult = hideAdult)
     }
     suspend fun popular(page: Int = 1, force: Boolean = false): MediaPage = mediaPage("popular:$page", COLLECTION_TTL, force) {
-        aniList.collection("POPULARITY_DESC", page = page, perPage = 30)
+        aniList.collection("POPULARITY_DESC", page = page, perPage = 30, hideAdult = hideAdult)
     }
     suspend fun topRated(page: Int = 1, force: Boolean = false): MediaPage = mediaPage("top:$page", COLLECTION_TTL, force) {
-        aniList.collection("SCORE_DESC", page = page, perPage = 30)
+        aniList.collection("SCORE_DESC", page = page, perPage = 30, hideAdult = hideAdult)
     }
     suspend fun recentlyReleased(page: Int = 1, force: Boolean = false): MediaPage =
         mediaPage("recent:$page", AIRING_TTL, force) {
-            aniList.collection("START_DATE_DESC", status = "RELEASING", page = page, perPage = 30)
+            aniList.collection("START_DATE_DESC", status = "RELEASING", page = page, perPage = 30, hideAdult = hideAdult)
         }
 
     suspend fun airing(page: Int = 1, force: Boolean = false): MediaPage =
         mediaPage("airing:$page", AIRING_TTL, force) {
-            aniList.collection("POPULARITY_DESC", status = "RELEASING", page = page, perPage = 40)
+            aniList.collection("POPULARITY_DESC", status = "RELEASING", page = page, perPage = 40, hideAdult = hideAdult)
         }
 
     suspend fun schedule(dayOffset: Int, force: Boolean = false): List<AiringSchedule> {
@@ -52,19 +56,21 @@ class MiruroRepository(
         val day = java.time.LocalDate.now(zone).plusDays(dayOffset.toLong())
         val start = day.atStartOfDay(zone).toEpochSecond()
         val end = day.plusDays(1).atStartOfDay(zone).toEpochSecond() - 1
-        return cache.getOrFetch(
+        // Cached unfiltered and filtered at read time, so toggling the setting applies instantly.
+        val schedules = cache.getOrFetch(
             key = "schedule:$day",
             serializer = ListSerializer(AiringSchedule.serializer()),
             ttlMs = SCHEDULE_TTL,
             forceRefresh = force,
         ) { aniList.airingSchedule(start, end) }
+        return if (hideAdult) schedules.filterNot { it.media?.isAdult == true } else schedules
     }
 
     suspend fun search(query: String, page: Int = 1, force: Boolean = false): MediaPage =
-        mediaPage("search:${query.trim().lowercase()}:$page", SEARCH_TTL, force) { aniList.search(query, page) }
+        mediaPage("search:${query.trim().lowercase()}:$page", SEARCH_TTL, force) { aniList.search(query, page, hideAdult = hideAdult) }
 
     suspend fun discover(filters: DiscoverFilters, page: Int = 1, force: Boolean = false): MediaPage =
-        mediaPage("discover:${filters.cacheKey()}:$page", COLLECTION_TTL, force) { aniList.discover(filters, page) }
+        mediaPage("discover:${filters.cacheKey()}:$page", COLLECTION_TTL, force) { aniList.discover(filters, page, hideAdult = hideAdult) }
 
     suspend fun discoverOptions(): DiscoverOptions = cache.getOrFetch(
         key = "discover-options",
@@ -167,13 +173,19 @@ class MiruroRepository(
         ttlMs: Long,
         force: Boolean = false,
         fetch: suspend () -> MediaPage,
-    ): MediaPage = cache.getOrFetch(
-        key = "media:v2:$key",
-        serializer = MediaPage.serializer(),
-        ttlMs = ttlMs,
-        forceRefresh = force,
-        fetch = fetch,
-    )
+    ): MediaPage {
+        // The adult preference is part of the cache key: filtered and unfiltered pages differ.
+        val hideAdult = hideAdult
+        val page = cache.getOrFetch(
+            key = "media:v2:$key:${if (hideAdult) "sfw" else "all"}",
+            serializer = MediaPage.serializer(),
+            ttlMs = ttlMs,
+            forceRefresh = force,
+            fetch = fetch,
+        )
+        // Safety net over the server-side isAdult filter (covers surfaces AniList can't filter).
+        return if (hideAdult) page.copy(items = page.items.filterNot { it.isAdult }) else page
+    }
 
     private fun DiscoverFilters.cacheKey(): String = listOf(
         query.trim().lowercase(),

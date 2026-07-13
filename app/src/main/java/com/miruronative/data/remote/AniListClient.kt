@@ -100,12 +100,12 @@ class AniListClient(
             )
         }
 
-    suspend fun search(query: String, page: Int = 1, perPage: Int = 20): MediaPage {
+    suspend fun search(query: String, page: Int = 1, perPage: Int = 20, hideAdult: Boolean = false): MediaPage {
         val gql = """
-            query (${'$'}search: String, ${'$'}page: Int, ${'$'}perPage: Int) {
+            query (${'$'}search: String, ${'$'}page: Int, ${'$'}perPage: Int, ${'$'}isAdult: Boolean) {
               Page(page: ${'$'}page, perPage: ${'$'}perPage) {
                 pageInfo { hasNextPage currentPage }
-                media(search: ${'$'}search, type: ANIME, sort: SEARCH_MATCH) { $mediaListFields }
+                media(search: ${'$'}search, type: ANIME, sort: SEARCH_MATCH, isAdult: ${'$'}isAdult) { $mediaListFields }
               }
             }
         """.trimIndent()
@@ -113,12 +113,13 @@ class AniListClient(
             put("search", query)
             put("page", page)
             put("perPage", perPage)
+            if (hideAdult) put("isAdult", false)
         }
         return queryPage(gql, vars, page)
     }
 
     /** Server-side catalog search used by Browse: every selected filter is applied by AniList. */
-    suspend fun discover(filters: DiscoverFilters, page: Int = 1, perPage: Int = 30): MediaPage {
+    suspend fun discover(filters: DiscoverFilters, page: Int = 1, perPage: Int = 30, hideAdult: Boolean = false): MediaPage {
         val gql = """
             query (
               ${'$'}search: String,
@@ -130,7 +131,8 @@ class AniListClient(
               ${'$'}status: MediaStatus,
               ${'$'}format: MediaFormat,
               ${'$'}minimumScore: Int,
-              ${'$'}sort: [MediaSort]
+              ${'$'}sort: [MediaSort],
+              ${'$'}isAdult: Boolean
             ) {
               Page(page: ${'$'}page, perPage: ${'$'}perPage) {
                 pageInfo { hasNextPage currentPage }
@@ -143,7 +145,8 @@ class AniListClient(
                   status: ${'$'}status,
                   format: ${'$'}format,
                   averageScore_greater: ${'$'}minimumScore,
-                  sort: ${'$'}sort
+                  sort: ${'$'}sort,
+                  isAdult: ${'$'}isAdult
                 ) { $mediaListFields }
               }
             }
@@ -152,6 +155,7 @@ class AniListClient(
             filters.query.trim().takeIf { it.isNotEmpty() }?.let { put("search", it) }
             put("page", page)
             put("perPage", perPage)
+            if (hideAdult) put("isAdult", false)
             if (filters.genres.isNotEmpty()) put("genres", buildJsonArray { filters.genres.forEach(::add) })
             if (filters.tags.isNotEmpty()) put("tags", buildJsonArray { filters.tags.forEach(::add) })
             filters.year?.let { put("year", it) }
@@ -185,13 +189,15 @@ class AniListClient(
         status: String? = null,
         page: Int = 1,
         perPage: Int = 20,
+        hideAdult: Boolean = false,
     ): MediaPage {
         val statusFilter = if (status != null) ", status: $status" else ""
+        val adultFilter = if (hideAdult) ", isAdult: false" else ""
         val gql = """
             query (${'$'}page: Int, ${'$'}perPage: Int) {
               Page(page: ${'$'}page, perPage: ${'$'}perPage) {
                 pageInfo { hasNextPage currentPage }
-                media(type: ANIME, sort: [$sort]$statusFilter) { $mediaListFields }
+                media(type: ANIME, sort: [$sort]$statusFilter$adultFilter) { $mediaListFields }
               }
             }
         """.trimIndent()

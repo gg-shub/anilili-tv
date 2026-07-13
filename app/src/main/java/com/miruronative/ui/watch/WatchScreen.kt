@@ -23,6 +23,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.DropdownMenu
@@ -229,6 +231,21 @@ private fun WatchContent(
                             onFullscreenChanged = onFullscreenChanged,
                             onProgress = onProgress,
                         )
+                        // Embed players often use CSS "web fullscreen" that never reaches the
+                        // WebView fullscreen callback, so the app provides its own toggle.
+                        IconButton(
+                            onClick = onToggleFullscreen,
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(4.dp)
+                                .focusHighlight(RoundedCornerShape(24.dp)),
+                        ) {
+                            Icon(
+                                if (fullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                                contentDescription = if (fullscreen) "Exit fullscreen" else "Fullscreen",
+                                tint = Color.White.copy(alpha = 0.85f),
+                            )
+                        }
                     }
                 else -> PlayerSurface(
                     stream = stream,
