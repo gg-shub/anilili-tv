@@ -70,6 +70,7 @@ import com.miruronative.diagnostics.DiagnosticsLog
 import com.miruronative.data.settings.SettingsStore
 import com.miruronative.data.update.UpdateManager
 import com.miruronative.ui.detail.DetailScreen
+import com.miruronative.ui.FlixcloudResolverWebView
 import com.miruronative.ui.home.HomeScreen
 import com.miruronative.ui.PipeWebView
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
@@ -331,6 +332,8 @@ private fun MiruroRoot(
             }
             // Hidden Cloudflare-cleared WebView that carries all pipe requests.
             PipeWebView()
+            // Hidden flixcloud resolver that opportunistically promotes embeds to native HLS.
+            FlixcloudResolverWebView()
         }
     }
 }

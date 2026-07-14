@@ -109,18 +109,27 @@ class AnivexaClient(
         val base = "https://megaplay.buzz"
         val primary = MegaPlayEmbed("$base/stream/ani/${media.id}/$episode/$audio", "https://hianimes.re/", null)
         val primaryResult = megaPlaySources(primary)
-        val result = if (primaryResult.streams.any { it.isHls }) {
-            primaryResult
-        } else {
-            runCatching { anikotoSiteEmbed(media, audio, episode)?.let(::megaPlaySources) }
-                .getOrNull()
-                ?.takeIf { it.streams.any(StreamItem::isHls) }
+        val result = when {
+            primaryResult.streams.any { it.isHls } -> primaryResult
+            // MegaPlay hosts the full library but doesn't map every show to an AniList id.
+            // Retry by MyAnimeList id (when known) before falling back to scraping the site.
+            else -> anikotoMalSources(base, media, audio, episode)
+                ?: runCatching { anikotoSiteEmbed(media, audio, episode)?.let(::megaPlaySources) }
+                    .getOrNull()
+                    ?.takeIf { it.streams.any(StreamItem::isHls) }
                 ?: primaryResult
         }
 
         val streams = result.streams.toMutableList()
         streams += stream(result.embedUrl, "embed", "MegaPlay embed", "${result.origin}/", active = streams.isEmpty())
         return SourcesResult(streams.distinctBy { it.url }, result.subtitles.distinctBy { it.url }, result.skip, null)
+    }
+
+    /** MegaPlay by MyAnimeList id — covers shows that aren't mapped to an AniList id. */
+    private fun anikotoMalSources(base: String, media: Media, audio: String, episode: Int): MegaPlayResult? {
+        val malId = media.idMal ?: return null
+        val embed = MegaPlayEmbed("$base/stream/mal/$malId/$episode/$audio", "https://hianimes.re/", null)
+        return runCatching { megaPlaySources(embed) }.getOrNull()?.takeIf { it.streams.any(StreamItem::isHls) }
     }
 
     private fun megaPlaySources(embed: MegaPlayEmbed): MegaPlayResult {
@@ -273,35 +282,12 @@ class AnivexaClient(
 
     // ---- ReAnime --------------------------------------------------------------------------
 
-    private fun reanime(media: Media, audio: String, episode: Int): SourcesResult {
+    private suspend fun reanime(media: Media, audio: String, episode: Int): SourcesResult {
         val base = "https://reanime.to"
-        val title = titles(media).firstOrNull() ?: error("ReAnime requires a title")
-        val search = getJson("$base/api/v1/search?q=${enc(title)}&limit=8")
-        val results = when (search) {
-            is JsonArray -> search
-            is JsonObject -> (search["results"] as? JsonArray) ?: (search["data"] as? JsonArray) ?: JsonArray(emptyList())
-            else -> JsonArray(emptyList())
-        }
-        val slug = results.mapNotNull { element ->
-            val obj = element as? JsonObject ?: return@mapNotNull null
-            val id = obj.string("anime_id") ?: obj.string("slug") ?: obj.string("id") ?: return@mapNotNull null
-            val titleObject = obj["title"] as? JsonObject
-            val candidateTitle = titleObject?.string("english")
-                ?: titleObject?.string("romaji")
-                ?: obj.string("title")
-                ?: obj.string("name")
-                ?: id
-            Candidate(id, candidateTitle)
-        }.maxByOrNull { candidateScore(media, it) }?.slug ?: error("ReAnime match not found")
-
-        val watch = runCatching { getJson("$base/api/watch/$slug/$episode") as? JsonObject }.getOrNull()
         val flix = runCatching { getJson("$base/api/flix/${media.id}/$episode") as? JsonObject }.getOrNull()
-        val links = buildList {
-            addAll((watch?.get("episode_links") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject })
-            addAll((flix?.get("servers") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject })
-        }
+        val links = (flix?.get("servers") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
         val accepted = if (audio == "dub") setOf("dub", "s-dub") else setOf("sub", "s-sub")
-        val streams = links.mapNotNull { link ->
+        val embeds = links.mapNotNull { link ->
             val kind = link.string("dataType")?.lowercase() ?: return@mapNotNull null
             if (kind !in accepted) return@mapNotNull null
             var url = link.string("dataLink") ?: return@mapNotNull null
@@ -310,10 +296,44 @@ class AnivexaClient(
             if (audio == "dub" && !url.contains(Regex("""[?&]a="""))) {
                 url += if ('?' in url) "&a=1" else "?a=1"
             }
-            stream(url, "embed", link.string("serverName") ?: "ReAnime", "$base/", active = false)
-        }.distinctBy { it.url }.mapIndexed { index, item -> item.copy(isActive = index == 0) }
-        return SourcesResult(streams, emptyList(), skipTimes(watch), null)
+            ReanimeEmbed(url, link.string("serverName") ?: "ReAnime")
+        }.distinctBy { it.url }.sortedWith(
+            compareBy<ReanimeEmbed> { if (it.name.equals("HD-2", true)) 0 else 1 }
+                .thenBy { it.name },
+        )
+
+        if (embeds.isEmpty()) error("ReAnime episode $episode has no ${audio.uppercase()} servers")
+
+        val primary = embeds.first()
+        val embedHtml = runCatching { getText(primary.url, mapOf("Referer" to "$base/")) }.getOrDefault("")
+        val subtitles = ReanimeFlixcloudParser.subtitles(embedHtml, audio)
+        val skip = ReanimeFlixcloudParser.skip(embedHtml)
+        val nativeHls = runCatching { FlixcloudBridge.resolve(primary.url, "$base/") }
+            .getOrNull()
+
+        val streams = mutableListOf<StreamItem>()
+        if (!nativeHls.isNullOrBlank()) {
+            streams += stream(
+                nativeHls,
+                "hls",
+                "${primary.name} native",
+                "${origin(primary.url)}/",
+                active = true,
+            )
+        }
+        embeds.take(4).forEachIndexed { index, embed ->
+            streams += stream(
+                embed.url,
+                "embed",
+                "${embed.name} embed",
+                "$base/",
+                active = streams.isEmpty() && index == 0,
+            )
+        }
+        return SourcesResult(streams.distinctBy { it.url }, subtitles, skip, null)
     }
+
+    private data class ReanimeEmbed(val url: String, val name: String)
 
     // ---- AniZone --------------------------------------------------------------------------
 

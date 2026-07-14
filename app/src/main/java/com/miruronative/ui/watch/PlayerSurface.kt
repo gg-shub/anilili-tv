@@ -105,6 +105,8 @@ fun PlayerSurface(
         MediaController.Builder(context, token).buildAsync()
     }
     var controller by remember { mutableStateOf<MediaController?>(null) }
+    val currentProvider by rememberUpdatedState(provider)
+    val currentCategory by rememberUpdatedState(category)
 
     DisposableEffect(controllerFuture) {
         controllerFuture.addListener(
@@ -136,6 +138,8 @@ fun PlayerSurface(
             onDispose { }
         } else {
             val listener = object : Player.Listener {
+                private var audioPreferenceAppliedFor: String? = null
+
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     DiagnosticsLog.event(
                         "PlayerSurface playbackState=${playbackState.stateName()} " +
@@ -151,6 +155,14 @@ fun PlayerSurface(
                 override fun onPlayerError(error: PlaybackException) {
                     DiagnosticsLog.throwable("PlayerSurface player error code=${error.errorCodeName}", error)
                     onError(error.localizedMessage ?: "Playback failed")
+                }
+
+                override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                    val mediaId = activeController.currentMediaItem?.mediaId ?: return
+                    if (currentProvider != "reanime" || audioPreferenceAppliedFor == mediaId) return
+                    if (applyReanimeAudioPreference(activeController, currentCategory)) {
+                        audioPreferenceAppliedFor = mediaId
+                    }
                 }
             }
             DiagnosticsLog.event("PlayerSurface listener attached")
@@ -619,6 +631,51 @@ private fun applyAudioTrack(controller: MediaController, option: TrackOption?) {
         builder.setOverrideForType(TrackSelectionOverride(option.trackGroup, listOf(option.trackIndex)))
     }
     controller.trackSelectionParameters = builder.build()
+}
+
+private fun applyReanimeAudioPreference(controller: MediaController, category: String): Boolean {
+    val wantsDub = category.equals("dub", ignoreCase = true)
+    val options = controller.currentTracks.groups
+        .filter { it.type == C.TRACK_TYPE_AUDIO && it.isSupported }
+        .flatMap { group ->
+            (0 until group.length)
+                .filter { group.isTrackSupported(it) }
+                .map { index ->
+                    val format = group.getTrackFormat(index)
+                    TrackOption(
+                        trackGroup = group.getMediaTrackGroup(),
+                        trackIndex = index,
+                        name = listOfNotNull(format.label, format.language).joinToString(" ").ifBlank { "Audio" },
+                        selected = group.isTrackSelected(index),
+                    )
+                }
+        }
+    if (options.size < 2) return true
+    val selected = options.firstOrNull { it.selected }
+    val preferred = options.minByOrNull { reanimeAudioRank(it.name, wantsDub) }
+        ?.takeIf { reanimeAudioRank(it.name, wantsDub) < 50 }
+        ?: return true
+    if (selected?.trackGroup == preferred.trackGroup && selected.trackIndex == preferred.trackIndex) return true
+    applyAudioTrack(controller, preferred)
+    DiagnosticsLog.event("PlayerSurface ReAnime audio selected category=$category name=${preferred.name.take(80)}")
+    return true
+}
+
+private fun reanimeAudioRank(name: String, wantsDub: Boolean): Int {
+    val lower = name.lowercase()
+    return if (wantsDub) {
+        when {
+            lower.contains("english") || lower.contains(" eng") || lower == "en" -> 0
+            lower.contains("dub") -> 5
+            else -> 100
+        }
+    } else {
+        when {
+            lower.contains("japanese") || lower.contains(" jpn") || lower.contains(" ja") || lower == "ja" -> 0
+            lower.contains("native") -> 5
+            else -> 100
+        }
+    }
 }
 
 private fun applyTextTrack(controller: MediaController, option: TrackOption?) {
