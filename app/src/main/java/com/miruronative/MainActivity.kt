@@ -17,11 +17,14 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.lifecycleScope
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.DateRange
@@ -47,8 +50,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -244,12 +250,19 @@ private fun View.visibilityName(): String = when (visibility) {
     else -> visibility.toString()
 }
 
-private enum class Tab(val route: String, val label: String, val icon: ImageVector) {
+private enum class Tab(
+    val route: String,
+    private val englishLabel: String,
+    val icon: ImageVector,
+) {
     HOME(Routes.HOME, "Home", Icons.Default.Home),
     SEARCH(Routes.SEARCH, "Search", Icons.Default.Search),
     SCHEDULE(Routes.SCHEDULE, "Schedule", Icons.Default.DateRange),
     MORE(Routes.MORE, "Library", Icons.AutoMirrored.Filled.List),
     SETTINGS(Routes.SETTINGS, "Settings", Icons.Default.Settings),
+    ;
+
+    fun label(): String = englishLabel
 }
 
 @Composable
@@ -290,51 +303,18 @@ private fun MiruroRoot(
         }
     }
 
-    val context = LocalContext.current
-    LaunchedEffect(Unit) {
-        DiagnosticsLog.event("UpdateManager.autoCheckIfDue start")
-        UpdateManager.autoCheckIfDue(context)
-        DiagnosticsLog.event("UpdateManager.autoCheckIfDue complete")
-    }
-
     CompositionLocalProvider(LocalAppDeviceProfile provides deviceProfile) {
         NotificationPermissionEffect()
         UpdatePromptHost()
         Box(Modifier.fillMaxSize()) {
             Scaffold(
                 containerColor = MaterialTheme.colorScheme.background,
-                bottomBar = {
-                    if (showBottomBar && !deviceProfile.useNavigationRail) {
-                        NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
-                            Tab.entries.forEach { tab ->
-                                NavigationBarItem(
-                                    selected = currentRoute == tab.route,
-                                    onClick = { nav.navigateTab(tab.route) },
-                                    icon = { Icon(tab.icon, contentDescription = tab.label) },
-                                    label = { Text(tab.label) },
-                                    colors = NavigationBarItemDefaults.colors(
-                                        selectedIconColor = MaterialTheme.colorScheme.onPrimary,
-                                        indicatorColor = MaterialTheme.colorScheme.primary,
-                                        selectedTextColor = MaterialTheme.colorScheme.primary,
-                                    ),
-                                )
-                            }
-                        }
-                    }
-                },
             ) { innerPadding ->
                 Row(
                     Modifier
                         .fillMaxSize()
                         .padding(bottom = innerPadding.calculateBottomPadding()),
                 ) {
-                    if (showBottomBar && deviceProfile.useNavigationRail) {
-                        AppNavigationRail(
-                            currentRoute = currentRoute,
-                            onNavigate = nav::navigateTab,
-                            modifier = Modifier.fillMaxHeight(),
-                        )
-                    }
                     AppNavHost(
                         nav = nav,
                         inPictureInPicture = inPictureInPicture,
@@ -391,18 +371,28 @@ private fun AppNavigationRail(
 ) {
     val device = LocalAppDeviceProfile.current
     val focusRequesters = remember { Tab.entries.associateWith { FocusRequester() } }
+    var isRailFocused by remember { mutableStateOf(false) }
+    
     LaunchedEffect(currentRoute, device.isTv) {
         if (device.isTv) {
             Tab.entries.firstOrNull { it.route == currentRoute }
                 ?.let { focusRequesters.getValue(it).requestFocus() }
         }
     }
+
+    val width by animateDpAsState(
+        targetValue = if (isRailFocused) 200.dp else 80.dp,
+        label = "rail-width"
+    )
+
     NavigationRail(
-        modifier = modifier,
+        modifier = modifier
+            .width(if (device.isTv) width else 80.dp)
+            .onFocusChanged { isRailFocused = it.hasFocus },
         containerColor = MaterialTheme.colorScheme.surface,
         header = {
             Text(
-                "anilili",
+                if (isRailFocused || !device.isTv) "anilili" else "A",
                 color = MaterialTheme.colorScheme.primary,
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(vertical = 20.dp),
@@ -410,12 +400,13 @@ private fun AppNavigationRail(
         },
     ) {
         Tab.entries.forEach { tab ->
+            val label = tab.label()
             NavigationRailItem(
                 selected = currentRoute == tab.route,
                 onClick = { onNavigate(tab.route) },
-                icon = { Icon(tab.icon, contentDescription = tab.label) },
-                label = { Text(tab.label) },
-                alwaysShowLabel = device.isTv,
+                icon = { Icon(tab.icon, contentDescription = label) },
+                label = { Text(label, maxLines = 1) },
+                alwaysShowLabel = isRailFocused || !device.isTv,
                 modifier = Modifier
                     .focusRequester(focusRequesters.getValue(tab))
                     .focusHighlight(),
@@ -447,6 +438,9 @@ private fun AppNavHost(
                     onResume = { e -> nav.navigate(Routes.watch(e.anilistId, e.provider, e.category, e.episodeLabel)) },
                     onSearchClick = { nav.navigateTab(Routes.SEARCH) },
                     onNotificationsClick = { nav.navigate(Routes.NOTIFICATIONS) { launchSingleTop = true } },
+                    onScheduleClick = { nav.navigateTab(Routes.SCHEDULE) },
+                    onLibraryClick = { nav.navigateTab(Routes.MORE) },
+                    onSettingsClick = { nav.navigateTab(Routes.SETTINGS) },
                 )
             }
             composable(Routes.NOTIFICATIONS) {
@@ -520,13 +514,6 @@ private fun AppNavHost(
                     episode = watchEpisode,
                     inPictureInPicture = inPictureInPicture,
                     onBack = { nav.popBackStack() },
-                    onAnimeDetails = {
-                        val id = args.getInt(Routes.Arg.ID)
-                        val route = Routes.detail(id)
-                        if (!nav.popBackStack(route, inclusive = false)) {
-                            nav.navigate(route) { launchSingleTop = true }
-                        }
-                    },
                 )
             }
         }
