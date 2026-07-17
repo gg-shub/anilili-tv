@@ -6,10 +6,13 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStoreFile
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import com.miruronative.diagnostics.CrashReporter
 import java.io.IOException
+import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -18,6 +21,22 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+
+enum class MenuLanguage(val storedValue: String) {
+    SYSTEM("system"),
+    ENGLISH("en"),
+    SPANISH("es");
+
+    fun usesSpanish(systemLanguage: String = Locale.getDefault().language): Boolean =
+        this == SPANISH || (this == SYSTEM && systemLanguage.equals("es", ignoreCase = true))
+
+    companion object {
+        fun fromStored(value: String?): MenuLanguage = entries.firstOrNull { it.storedValue == value } ?: SYSTEM
+    }
+}
+
+/** No global server has been chosen yet; the launch route supplies the initial server. */
+const val DEFAULT_PREFERRED_PROVIDER = "auto"
 
 /** Transactional DataStore preferences shared by playback and the Library settings UI. */
 object SettingsStore {
@@ -48,6 +67,18 @@ object SettingsStore {
     private val _subtitlesWithDub = MutableStateFlow(false)
     val subtitlesWithDub = _subtitlesWithDub.asStateFlow()
 
+    // Kept as one compound value rather than a flow per field: both players and the editor read
+    // the whole style at once, and a partial style is never meaningful.
+    private val _captionStyle = MutableStateFlow(CaptionStyle())
+    val captionStyle = _captionStyle.asStateFlow()
+
+    private val _menuLanguage = MutableStateFlow(MenuLanguage.SYSTEM)
+    val menuLanguage = _menuLanguage.asStateFlow()
+
+    private val _preferredProvider = MutableStateFlow(DEFAULT_PREFERRED_PROVIDER)
+    val preferredProvider = _preferredProvider.asStateFlow()
+    private val loaded = MutableStateFlow(false)
+
     fun init(context: Context) {
         val app = context.applicationContext
         store = PreferenceDataStoreFactory.create(
@@ -76,10 +107,59 @@ object SettingsStore {
     fun setHideAdultContent(value: Boolean) = save(HIDE_ADULT_CONTENT, value, _hideAdultContent)
     fun setSubtitlesWithDub(value: Boolean) = save(SUBTITLES_WITH_DUB, value, _subtitlesWithDub)
 
+    fun setCaptionBackgroundOpacity(percent: Int) =
+        editCaptionStyle { it.copy(backgroundOpacityPercent = percent.coerceIn(0, 100)) }
+    fun setCaptionBackgroundColor(value: CaptionBackgroundColor) =
+        editCaptionStyle { it.copy(backgroundColor = value) }
+    fun setCaptionTextScale(percent: Int) =
+        editCaptionStyle { it.copy(textScalePercent = percent.coerceIn(CaptionStyle.MIN_TEXT_SCALE_PERCENT, CaptionStyle.MAX_TEXT_SCALE_PERCENT)) }
+    fun setCaptionTextColor(value: CaptionTextColor) = editCaptionStyle { it.copy(textColor = value) }
+    fun setCaptionEdgeStyle(value: CaptionEdgeStyle) = editCaptionStyle { it.copy(edgeStyle = value) }
+    fun resetCaptionStyle() = editCaptionStyle { CaptionStyle() }
+
+    fun setMenuLanguage(value: MenuLanguage) {
+        _menuLanguage.value = value
+        scope.launch { store.edit { it[MENU_LANGUAGE] = value.storedValue } }
+    }
+    fun setPreferredProvider(value: String) {
+        val storedValue = value.trim().lowercase().ifBlank { DEFAULT_PREFERRED_PROVIDER }
+        _preferredProvider.value = storedValue
+        scope.launch { store.edit { it[PREFERRED_PROVIDER] = storedValue } }
+    }
+
+    /** Guarantees cold-start consumers see the persisted preference instead of the in-memory default. */
+    suspend fun awaitLoaded() {
+        loaded.first { it }
+    }
+
     private fun save(key: Preferences.Key<Boolean>, value: Boolean, state: MutableStateFlow<Boolean>) {
         state.value = value
         scope.launch { store.edit { it[key] = value } }
     }
+
+    private fun editCaptionStyle(transform: (CaptionStyle) -> CaptionStyle) {
+        val next = transform(_captionStyle.value)
+        _captionStyle.value = next
+        scope.launch {
+            store.edit { prefs ->
+                prefs[CAPTION_BACKGROUND_OPACITY] = next.backgroundOpacityPercent
+                prefs[CAPTION_BACKGROUND_COLOR] = next.backgroundColor.storedValue
+                prefs[CAPTION_TEXT_SCALE] = next.textScalePercent
+                prefs[CAPTION_TEXT_COLOR] = next.textColor.storedValue
+                prefs[CAPTION_EDGE_STYLE] = next.edgeStyle.storedValue
+            }
+        }
+    }
+
+    internal fun readCaptionStyle(prefs: Preferences): CaptionStyle = CaptionStyle(
+        backgroundOpacityPercent = prefs[CAPTION_BACKGROUND_OPACITY]?.coerceIn(0, 100)
+            ?: CaptionStyle.DEFAULT_BACKGROUND_OPACITY_PERCENT,
+        backgroundColor = CaptionBackgroundColor.fromStored(prefs[CAPTION_BACKGROUND_COLOR]),
+        textScalePercent = prefs[CAPTION_TEXT_SCALE]?.coerceIn(CaptionStyle.MIN_TEXT_SCALE_PERCENT, CaptionStyle.MAX_TEXT_SCALE_PERCENT)
+            ?: CaptionStyle.DEFAULT_TEXT_SCALE_PERCENT,
+        textColor = CaptionTextColor.fromStored(prefs[CAPTION_TEXT_COLOR]),
+        edgeStyle = CaptionEdgeStyle.fromStored(prefs[CAPTION_EDGE_STYLE]),
+    )
 
     private fun applyPreferences(prefs: Preferences) {
         _autoplay.value = prefs[AUTOPLAY] ?: true
@@ -90,6 +170,11 @@ object SettingsStore {
         _autoSkipIntroOutro.value = prefs[AUTO_SKIP_INTRO_OUTRO] ?: false
         _hideAdultContent.value = prefs[HIDE_ADULT_CONTENT] ?: true
         _subtitlesWithDub.value = prefs[SUBTITLES_WITH_DUB] ?: false
+        _captionStyle.value = readCaptionStyle(prefs)
+        _menuLanguage.value = MenuLanguage.fromStored(prefs[MENU_LANGUAGE])
+        _preferredProvider.value =
+            prefs[PREFERRED_PROVIDER]?.takeIf(String::isNotBlank) ?: DEFAULT_PREFERRED_PROVIDER
+        loaded.value = true
     }
 
     private suspend fun migrateLegacyPreferences(context: Context) {
@@ -116,5 +201,12 @@ object SettingsStore {
     private val AUTO_SKIP_INTRO_OUTRO = booleanPreferencesKey("auto_skip_intro_outro")
     private val HIDE_ADULT_CONTENT = booleanPreferencesKey("hide_adult_content")
     private val SUBTITLES_WITH_DUB = booleanPreferencesKey("subtitles_with_dub")
+    private val CAPTION_BACKGROUND_OPACITY = intPreferencesKey("caption_background_opacity")
+    private val CAPTION_BACKGROUND_COLOR = stringPreferencesKey("caption_background_color")
+    private val CAPTION_TEXT_SCALE = intPreferencesKey("caption_text_scale")
+    private val CAPTION_TEXT_COLOR = stringPreferencesKey("caption_text_color")
+    private val CAPTION_EDGE_STYLE = stringPreferencesKey("caption_edge_style")
+    private val MENU_LANGUAGE = stringPreferencesKey("menu_language")
+    private val PREFERRED_PROVIDER = stringPreferencesKey("preferred_provider")
     private val MIGRATED = booleanPreferencesKey("migrated_from_shared_preferences")
 }

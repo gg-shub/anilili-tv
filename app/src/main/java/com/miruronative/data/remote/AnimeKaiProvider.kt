@@ -19,6 +19,14 @@ internal class AnimeKaiProvider(private val client: OkHttpClient) {
     private val matches = ConcurrentHashMap<Int, Match>()
     @Volatile private var activeBase = MIRRORS.first()
 
+    fun episodeAvailability(media: Media): EpisodeAvailability {
+        val match = matches[media.id] ?: resolveMatch(media).also { matches[media.id] = it }
+        val html = getKai("${match.base}/watch/${match.slug}", "${match.base}/")
+        return NativeProviderParsers.dataAudioEpisodes(html).also {
+            if (it.sub.isEmpty() && it.dub.isEmpty()) error("AnimeKai returned no episode catalog")
+        }
+    }
+
     fun sources(media: Media, audio: String, episode: Int): SourcesResult {
         val match = matches[media.id] ?: resolveMatch(media).also { matches[media.id] = it }
         val page = episodePage(match, episode)
@@ -27,8 +35,9 @@ internal class AnimeKaiProvider(private val client: OkHttpClient) {
         if (servers.isEmpty()) error("AnimeKai episode $episode has no servers")
 
         val preferredLanguages = if (audio == "dub") listOf("dub") else listOf("hsub", "sub", "softsub")
-        val pool = servers.filter { it.language in preferredLanguages }.ifEmpty { servers }
+        val pool = servers.filter { it.language in preferredLanguages }
             .sortedByDescending { serverRank(it.videoUrl) }
+        if (pool.isEmpty()) error("AnimeKai episode $episode has no ${audio.uppercase()} servers")
         val groupSubtitles = pool.flatMap { AnimeKaiParser.embedSubtitles(it.videoUrl) }.distinctBy(SubtitleItem::url)
 
         pool.take(8).forEach { server ->
@@ -175,7 +184,7 @@ internal class AnimeKaiProvider(private val client: OkHttpClient) {
     }
 
     private fun score(media: Media, candidate: String): Double = titles(media).maxOfOrNull { title ->
-        NativeProviderParsers.titleScore(title, candidate)
+        NativeProviderParsers.titleSelectionScore(title, candidate)
     } ?: 0.0
 
     private fun titles(media: Media): List<String> = listOfNotNull(

@@ -7,22 +7,49 @@ import com.miruronative.data.model.EpisodesResult
 import com.miruronative.data.model.DiscoverFilters
 import com.miruronative.data.model.Media
 import com.miruronative.data.model.MediaPage
+import com.miruronative.data.model.HomeCollections
 import com.miruronative.data.model.SourcesResult
 import com.miruronative.data.cache.AppCache
+import com.miruronative.data.auth.AuthManager
 import com.miruronative.data.model.DiscoverOptions
+import com.miruronative.data.model.SkipTimes
 import com.miruronative.data.remote.AniListClient
+import com.miruronative.data.remote.AniSkipClient
 import com.miruronative.data.remote.AnivexaClient
 import com.miruronative.data.remote.JikanClient
 import com.miruronative.data.remote.PipeClient
 import com.miruronative.data.settings.SettingsStore
+import com.miruronative.diagnostics.DiagnosticsLog
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.SetSerializer
 import kotlinx.serialization.builtins.nullable
 import kotlinx.serialization.builtins.serializer
+
+/**
+ * Keeps fallback attempts spread across independent backends. Providers from one backend often
+ * fail together, so exhausting the attempt budget on adjacent aliases defeats fallback entirely.
+ */
+internal fun providerAttemptOrder(preferred: String, providerNames: List<String>): List<String> {
+    val available = (listOf(preferred) + providerNames.sortedBy { ProviderCatalog.sortKey(it) }).distinct()
+    val preferredSource = ProviderCatalog.sourceOf(preferred)
+    val sameSource = available.filter { it != preferred && ProviderCatalog.sourceOf(it) == preferredSource }
+    val otherSource = available.filter { ProviderCatalog.sourceOf(it) != preferredSource }
+
+    return buildList {
+        add(preferred)
+        repeat(maxOf(sameSource.size, otherSource.size)) { index ->
+            otherSource.getOrNull(index)?.let(::add)
+            sameSource.getOrNull(index)?.let(::add)
+        }
+    }
+}
 
 /**
  * Single entry point the UI talks to. Combines AniList metadata with two streaming backends —
@@ -33,12 +60,35 @@ class MiruroRepository(
     private val pipe: PipeClient,
     private val anivexa: AnivexaClient,
     private val jikan: JikanClient,
+    private val aniSkip: AniSkipClient,
     private val cache: AppCache,
 ) {
     /** User preference: keep hentai out of every browsing surface. */
     private val hideAdult: Boolean get() = SettingsStore.hideAdultContent.value
 
+    // Bounds the related-seasons walk's AniList fan-out so it can't monopolise the shared,
+    // rate-limited connection pool (5/host) and stall playback-critical metadata/catalog lookups.
+    private val seriesFetchGate = Semaphore(SERIES_FETCH_CONCURRENCY)
+
     // ---- discovery (AniList) ----
+    suspend fun homeCollections(force: Boolean = false): HomeCollections {
+        val adultHidden = hideAdult
+        val collections = cache.getOrFetch(
+            key = "home:v1:${if (adultHidden) "sfw" else "all"}",
+            serializer = HomeCollections.serializer(),
+            ttlMs = HOME_TTL,
+            forceRefresh = force,
+        ) { aniList.homeCollections(adultHidden) }
+        if (!adultHidden) return collections
+        return collections.copy(
+            spotlight = collections.spotlight.filterNot { it.isAdult },
+            newest = collections.newest.filterNot { it.isAdult },
+            popular = collections.popular.filterNot { it.isAdult },
+            movies = collections.movies.filterNot { it.isAdult },
+            topRated = collections.topRated.filterNot { it.isAdult },
+        )
+    }
+
     suspend fun trending(page: Int = 1, force: Boolean = false): MediaPage = mediaPage("trending:$page", COLLECTION_TTL, force) {
         aniList.collection("TRENDING_DESC", page = page, perPage = 30, hideAdult = hideAdult)
     }
@@ -62,7 +112,7 @@ class MiruroRepository(
         val zone = java.time.ZoneId.systemDefault()
         val day = java.time.LocalDate.now(zone).plusDays(dayOffset.toLong())
         val start = day.atStartOfDay(zone).toEpochSecond()
-        val end = day.plusDays(1).atStartOfDay(zone).toEpochSecond() - 1
+        val end = day.plusDays(1).atStartOfDay(zone).toEpochSecond()
         // Cached unfiltered and filtered at read time, so toggling the setting applies instantly.
         val schedules = cache.getOrFetch(
             key = "schedule:$day",
@@ -79,20 +129,27 @@ class MiruroRepository(
     suspend fun discover(filters: DiscoverFilters, page: Int = 1, force: Boolean = false): MediaPage =
         mediaPage("discover:${filters.cacheKey()}:$page", COLLECTION_TTL, force) { aniList.discover(filters, page, hideAdult = hideAdult) }
 
-    suspend fun discoverOptions(): DiscoverOptions = cache.getOrFetch(
-        key = "discover-options",
-        serializer = DiscoverOptions.serializer(),
-        ttlMs = OPTIONS_TTL,
-    ) { aniList.discoverOptions() }
+    suspend fun discoverOptions(): DiscoverOptions {
+        val adultHidden = hideAdult
+        return cache.getOrFetch(
+            key = "discover-options:${if (adultHidden) "sfw" else "all"}",
+            serializer = DiscoverOptions.serializer(),
+            ttlMs = OPTIONS_TTL,
+        ) { aniList.discoverOptions(adultHidden) }
+    }
 
     // ---- authenticated (AniList login) ----
     suspend fun viewer() = aniList.viewer()
     suspend fun notifications(markAllRead: Boolean = false) = aniList.notifications(markAllRead)
     suspend fun favouriteAnime() = aniList.favouriteAnime()
     suspend fun userAnimeList(userId: Int) = aniList.userAnimeList(userId)
-    suspend fun saveAniListProgress(mediaId: Int, progress: Int, completed: Boolean = false) =
-        aniList.saveMediaListEntry(mediaId, if (completed) "COMPLETED" else "CURRENT", progress)
+    suspend fun saveAniListProgress(mediaId: Int, progress: Int, totalEpisodes: Int?) =
+        aniList.syncMediaListProgress(mediaId, progress, totalEpisodes)
     suspend fun syncSavedAnime(mediaId: Int, saved: Boolean) = aniList.syncSavedAnime(mediaId, saved)
+    suspend fun syncSavedAnime(mediaIds: Collection<Int>) {
+        val viewerId = AuthManager.viewerId() ?: aniList.viewer()?.id ?: return
+        aniList.syncSavedAnime(mediaIds, viewerId)
+    }
 
     /** MAL filler episode numbers via Jikan; cached a week, empty on failure or no MAL id. */
     suspend fun fillerEpisodes(malId: Int?): Set<Int> {
@@ -104,29 +161,101 @@ class MiruroRepository(
         ) { withContext(Dispatchers.IO) { jikan.fillerEpisodes(malId) } }
     }
 
+    /** Community intro/outro markers via AniSkip; cached, null when unknown or on failure. */
+    suspend fun skipTimes(anilistId: Int, episode: Double): SkipTimes? {
+        if (episode % 1.0 != 0.0 || episode < 1) return null
+        val malId = animeInfo(anilistId)?.idMal?.takeIf { it > 0 } ?: return null
+        return cache.getOrFetch(
+            key = "aniskip:$malId:${episode.toInt()}",
+            serializer = SkipTimes.serializer().nullable,
+            ttlMs = OPTIONS_TTL,
+        ) { withContext(Dispatchers.IO) { runCatching { aniSkip.skipTimes(malId, episode.toInt()) }.getOrNull() } }
+    }
+
     suspend fun animeInfo(id: Int, force: Boolean = false): Media? = cache.getOrFetch(
-        key = "anime:v2:$id",
+        key = "anime:v3:$id",
         serializer = Media.serializer().nullable,
         ttlMs = INFO_TTL,
         forceRefresh = force,
     ) { aniList.animeInfo(id) }
 
+    /** Walks AniList's PREQUEL/SEQUEL chain so every season is reachable from one detail page. */
+    suspend fun animeSeries(root: Media): List<Media> = coroutineScope {
+        val found = linkedMapOf(root.id to root)
+        val expanded = mutableSetOf<Int>()
+        var frontier = listOf(root)
+        var depth = 0
+
+        while (frontier.isNotEmpty() && found.size < MAX_SERIES_ENTRIES && depth < MAX_SERIES_DEPTH) {
+            val batch = frontier
+                .filter { expanded.add(it.id) }
+                .take(MAX_SERIES_ENTRIES - found.size + 1)
+            if (batch.isEmpty()) break
+
+            val detailed = batch.map { media ->
+                async {
+                    if (media.id == root.id && media.relations.edges.isNotEmpty()) {
+                        media
+                    } else {
+                        seriesFetchGate.withPermit { runCatching { animeInfo(media.id) }.getOrNull() } ?: media
+                    }
+                }
+            }.awaitAll()
+
+            val next = mutableListOf<Media>()
+            detailed.forEach { media ->
+                found[media.id] = media
+                media.seasonNeighbors().forEach { neighbor ->
+                    if (hideAdult && neighbor.isAdult) return@forEach
+                    if (neighbor.id !in found && found.size < MAX_SERIES_ENTRIES) {
+                        found[neighbor.id] = neighbor
+                    }
+                    if (neighbor.id !in expanded) next += neighbor
+                }
+            }
+            frontier = next.distinctBy(Media::id)
+            depth++
+        }
+
+        found.values.sortedWith(
+            compareBy<Media>(
+                { it.startDate?.year ?: it.seasonYear ?: Int.MAX_VALUE },
+                { it.startDate?.month ?: Int.MAX_VALUE },
+                { it.startDate?.day ?: Int.MAX_VALUE },
+                { it.id },
+            ),
+        )
+    }
+
     // ---- streaming (two backends, cached per source) ----
     /** Fast source — the Miruro pipe. */
     suspend fun miruroEpisodes(anilistId: Int, force: Boolean = false): EpisodesResult = cache.getOrFetch(
-        key = "episodes:miruro:$anilistId",
+        key = "episodes:v3:miruro:$anilistId",
         serializer = EpisodesResult.serializer(),
         ttlMs = EPISODES_TTL,
         forceRefresh = force,
-    ) { pipe.getEpisodes(anilistId) }.withFillerMarks(anilistId)
+    ) {
+        pipe.getEpisodes(anilistId).also {
+            check(!it.isEmpty) { "Miruro returned no episode providers" }
+        }
+    }.withFillerMarks(anilistId)
 
     /** Extra sources — Anivexa-API (can be slower; loaded in the background by the detail screen). */
-    suspend fun anivexaEpisodes(anilistId: Int, force: Boolean = false): EpisodesResult = cache.getOrFetch(
-        key = "episodes:anivexa:$anilistId",
-        serializer = EpisodesResult.serializer(),
-        ttlMs = EPISODES_TTL,
-        forceRefresh = force,
-    ) { anivexa.getEpisodes(anilistId) }.withFillerMarks(anilistId)
+    suspend fun anivexaEpisodes(anilistId: Int, force: Boolean = false): EpisodesResult {
+        // Fetched here (outside the episodes cache lock — the striped mutexes are not reentrant) so
+        // the Anivexa catalog reuses the shared AniList Media instead of re-requesting it itself.
+        val seed = runCatching { animeInfo(anilistId) }.getOrNull()
+        return cache.getOrFetch(
+            key = "episodes:v4:anivexa:$anilistId",
+            serializer = EpisodesResult.serializer(),
+            ttlMs = EPISODES_TTL,
+            forceRefresh = force,
+        ) {
+            anivexa.getEpisodes(anilistId, seed).also {
+                check(!it.isEmpty) { "Anivexa returned no episode providers" }
+            }
+        }.withFillerMarks(anilistId)
+    }
 
     /**
      * Applies MAL filler flags to every provider's episode list. Providers rarely carry filler
@@ -149,10 +278,14 @@ class MiruroRepository(
     /** Merged view of both sources — used where the full provider list is needed (watch screen). */
     suspend fun episodes(anilistId: Int): EpisodesResult = coroutineScope {
         val miruro = async {
-            runCatching { miruroEpisodes(anilistId) }.getOrDefault(EpisodesResult(emptyList()))
+            runCatching { miruroEpisodes(anilistId) }
+                .onFailure { DiagnosticsLog.throwable("Miruro episodes failed id=$anilistId", it) }
+                .getOrDefault(EpisodesResult(emptyList()))
         }
         val anivexa = async {
-            runCatching { anivexaEpisodes(anilistId) }.getOrDefault(EpisodesResult(emptyList()))
+            runCatching { anivexaEpisodes(anilistId) }
+                .onFailure { DiagnosticsLog.throwable("Anivexa episodes failed id=$anilistId", it) }
+                .getOrDefault(EpisodesResult(emptyList()))
         }
         mergeProviders(miruro.await(), anivexa.await())
     }
@@ -166,39 +299,52 @@ class MiruroRepository(
         category: Category,
         anilistId: Int,
     ): SourcesResult = when (ProviderCatalog.sourceOf(provider)) {
-        ProviderCatalog.Source.ANIVEXA -> anivexa.getSources(pipeId)
+        ProviderCatalog.Source.ANIVEXA -> anivexa.getSources(pipeId, animeInfo(anilistId))
         ProviderCatalog.Source.MIRURO -> pipe.getSources(pipeId, provider, category, anilistId)
     }
 
     data class ResolvedSources(val sources: SourcesResult, val provider: String)
 
     /**
-     * Resolve a playable stream for [number], trying [preferred] first and then other providers
-     * (fast Miruro ones before slower Anivexa scrapers) until one actually returns a stream.
-     * This is the multi-source fallback: picking a server that has no copy silently rolls over.
+     * Resolve a playable stream for [number] within the supplied [episodes] catalog, trying
+     * [preferred] first and then other providers (fast Miruro ones before slower Anivexa
+     * scrapers) until one actually returns a stream. This is the multi-source fallback: picking
+     * a server that has no copy silently rolls over. The caller owns the catalog so playback can
+     * start on the fast Miruro set before the Anivexa providers have finished loading.
      */
     suspend fun resolveSources(
         anilistId: Int,
         number: Double,
         preferred: String,
         category: Category,
+        episodes: EpisodesResult,
         excludedProviders: Set<String> = emptySet(),
         maxAttempts: Int = 5,
     ): ResolvedSources? {
-        val merged = episodes(anilistId)
-        val ordered = (listOf(preferred) + merged.providerNames.sortedBy { ProviderCatalog.sortKey(it) })
-            .distinct()
+        val ordered = providerAttemptOrder(preferred, episodes.providerNames)
 
         var attempts = 0
         for (name in ordered) {
             if (attempts >= maxAttempts) break
             if (name in excludedProviders) continue
-            val provider = merged.provider(name) ?: continue
+            val provider = episodes.provider(name) ?: continue
             val ep = provider.episodes(category).firstOrNull { it.number == number } ?: continue
             attempts++
-            val result = runCatching { sources(ep.pipeId, name, category, anilistId) }.getOrNull()
+            val result = runCatching { sources(ep.pipeId, name, category, anilistId) }
+                .onFailure {
+                    DiagnosticsLog.throwable(
+                        "Source resolve failed provider=$name id=$anilistId episode=$number",
+                        it,
+                    )
+                }
+                .getOrNull()
             if (result != null && result.streams.isNotEmpty()) {
                 return ResolvedSources(result, name)
+            }
+            if (result != null) {
+                DiagnosticsLog.event(
+                    "Source resolve empty provider=$name id=$anilistId episode=$number",
+                )
             }
         }
         return null
@@ -237,7 +383,11 @@ class MiruroRepository(
     private fun Any?.orEmpty(): String = this?.toString() ?: ""
 
     private companion object {
+        const val MAX_SERIES_ENTRIES = 16
+        const val MAX_SERIES_DEPTH = 8
+        const val SERIES_FETCH_CONCURRENCY = 2
         const val SCHEDULE_TTL = 15L * 60 * 1000
+        const val HOME_TTL = 30L * 60 * 1000
         const val SEARCH_TTL = 30L * 60 * 1000
         const val AIRING_TTL = 30L * 60 * 1000
         const val COLLECTION_TTL = 4L * 60 * 60 * 1000
@@ -247,3 +397,10 @@ class MiruroRepository(
         const val OPTIONS_TTL = 7L * 24 * 60 * 60 * 1000
     }
 }
+
+internal fun Media.seasonNeighbors(): List<Media> = relations.edges
+    .asSequence()
+    .filter { it.relationType == "PREQUEL" || it.relationType == "SEQUEL" }
+    .mapNotNull { it.node }
+    .distinctBy(Media::id)
+    .toList()

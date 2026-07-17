@@ -14,9 +14,10 @@ data class MediaTitle(
     val romaji: String? = null,
     val english: String? = null,
     val native: String? = null,
+    val userPreferred: String? = null,
 ) {
-    /** Best display title, mirroring the site's english-first preference. */
-    val preferred: String get() = english ?: romaji ?: native ?: "Untitled"
+    /** The app is English-first; AniList's viewer preference is only a fallback. */
+    val preferred: String get() = english ?: userPreferred ?: romaji ?: native ?: "Untitled"
 }
 
 @Serializable
@@ -48,6 +49,15 @@ data class StudioConnection(val nodes: List<StudioNode> = emptyList())
 data class Trailer(val id: String? = null, val site: String? = null, val thumbnail: String? = null)
 
 @Serializable
+data class MediaRelationEdge(
+    val relationType: String? = null,
+    val node: Media? = null,
+)
+
+@Serializable
+data class MediaRelationConnection(val edges: List<MediaRelationEdge> = emptyList())
+
+@Serializable
 data class Media(
     val id: Int,
     val idMal: Int? = null,
@@ -73,6 +83,7 @@ data class Media(
     val startDate: FuzzyDate? = null,
     val endDate: FuzzyDate? = null,
     val trailer: Trailer? = null,
+    val relations: MediaRelationConnection = MediaRelationConnection(),
 )
 
 /** Filters supported by AniList's Media catalog query. */
@@ -142,6 +153,27 @@ data class MediaData(@SerialName("Media") val media: Media? = null)
 data class GqlPageResponse(val data: PageData? = null)
 
 @Serializable
+data class HomeCollections(
+    val spotlight: List<Media> = emptyList(),
+    val newest: List<Media> = emptyList(),
+    val popular: List<Media> = emptyList(),
+    val movies: List<Media> = emptyList(),
+    val topRated: List<Media> = emptyList(),
+)
+
+@Serializable
+data class HomeCollectionsData(
+    val spotlight: Page? = null,
+    val newest: Page? = null,
+    val popular: Page? = null,
+    val movies: Page? = null,
+    val topRated: Page? = null,
+)
+
+@Serializable
+data class GqlHomeCollectionsResponse(val data: HomeCollectionsData? = null)
+
+@Serializable
 data class GqlMediaResponse(val data: MediaData? = null)
 
 // ---- Airing schedule ----
@@ -153,7 +185,10 @@ data class AiringSchedule(
 )
 
 @Serializable
-data class SchedulePage(val airingSchedules: List<AiringSchedule> = emptyList())
+data class SchedulePage(
+    val pageInfo: PageInfo = PageInfo(),
+    val airingSchedules: List<AiringSchedule> = emptyList(),
+)
 
 @Serializable
 data class SchedulePageData(@SerialName("Page") val page: SchedulePage? = null)
@@ -222,7 +257,12 @@ data class MediaListEntry(
 )
 
 @Serializable
-data class MediaListGroup(val name: String? = null, val status: String? = null, val entries: List<MediaListEntry> = emptyList())
+data class MediaListGroup(
+    val name: String? = null,
+    val status: String? = null,
+    val isCustomList: Boolean = false,
+    val entries: List<MediaListEntry> = emptyList(),
+)
 
 @Serializable
 data class MediaListCollection(val lists: List<MediaListGroup> = emptyList())

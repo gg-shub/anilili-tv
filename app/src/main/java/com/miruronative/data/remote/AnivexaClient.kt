@@ -9,13 +9,17 @@ import com.miruronative.data.model.SkipTimes
 import com.miruronative.data.model.SourcesResult
 import com.miruronative.data.model.StreamItem
 import com.miruronative.data.model.SubtitleItem
+import com.miruronative.diagnostics.DiagnosticsLog
 import java.net.URI
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.Collections
 import java.util.LinkedHashMap
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -45,6 +49,7 @@ class AnivexaClient(
         val streams: List<StreamItem>,
         val subtitles: List<SubtitleItem>,
         val skip: SkipTimes?,
+        val embedAvailable: Boolean,
     )
 
     private val mediaCache = boundedMap<Int, Media>(100)
@@ -52,7 +57,10 @@ class AnivexaClient(
     private val allAnime = AllAnimeProvider(client, json)
     private val animeKai = AnimeKaiProvider(client)
 
-    suspend fun getEpisodes(anilistId: Int): EpisodesResult = withContext(Dispatchers.IO) {
+    suspend fun getEpisodes(anilistId: Int, seedMedia: Media? = null): EpisodesResult = withContext(Dispatchers.IO) {
+        // The caller (repository) has usually already fetched this AniList Media through the shared
+        // 24h cache; reuse it so a cold catalog doesn't fire a second, rate-limit-exposed request.
+        seedMedia?.let { mediaCache[anilistId] = it }
         val media = media(anilistId)
         val aired = media.nextAiringEpisode?.episode?.minus(1)?.takeIf { it > 0 }
         val count = when {
@@ -62,18 +70,34 @@ class AnivexaClient(
             else -> 1
         }
 
-        EpisodesResult(
-            ProviderCatalog.anivexaProviders.map { provider ->
-                val sub = episodeRows(provider, anilistId, "sub", count)
-                val dub = if (provider == "anizone") emptyList() else episodeRows(provider, anilistId, "dub", count)
-                ProviderData(provider, sub, dub)
-            },
-        )
+        coroutineScope {
+            val lookups = ProviderCatalog.anivexaProviders.associateWith { provider ->
+                async {
+                    runCatching {
+                        withTimeout(CATALOG_TIMEOUT_MS) { providerAvailability(provider, media, count) }
+                    }.onFailure {
+                        DiagnosticsLog.throwable("Native episode catalog failed provider=$provider id=$anilistId", it)
+                    }.getOrNull()
+                }
+            }
+            EpisodesResult(
+                ProviderCatalog.anivexaProviders.mapNotNull { provider ->
+                    lookups.getValue(provider).await()?.let { availability ->
+                        ProviderData(
+                            name = provider,
+                            sub = episodeRows(provider, anilistId, "sub", availability.sub),
+                            dub = episodeRows(provider, anilistId, "dub", availability.dub),
+                        )
+                    }
+                },
+            )
+        }
     }
 
-    suspend fun getSources(episodeId: String): SourcesResult = withContext(Dispatchers.IO) {
+    suspend fun getSources(episodeId: String, seedMedia: Media? = null): SourcesResult = withContext(Dispatchers.IO) {
         val request = NativeProviderParsers.episodeRequest(episodeId)
             ?: error("Invalid native provider episode id: $episodeId")
+        seedMedia?.let { mediaCache[request.anilistId] = it }
         val media = media(request.anilistId)
         when (request.provider) {
             "anikoto" -> anikoto(media, request.audio, request.episode)
@@ -92,8 +116,8 @@ class AnivexaClient(
         ?: aniList.animeInfo(id)?.also { mediaCache[id] = it }
         ?: error("Anime $id was not found on AniList")
 
-    private fun episodeRows(provider: String, id: Int, audio: String, count: Int): List<EpisodeItem> =
-        (1..count).map { number ->
+    private fun episodeRows(provider: String, id: Int, audio: String, numbers: Set<Int>): List<EpisodeItem> =
+        numbers.sorted().map { number ->
             EpisodeItem(
                 pipeId = "watch/$provider/$id/$audio/$provider-$number",
                 number = number.toDouble(),
@@ -102,6 +126,130 @@ class AnivexaClient(
                 filler = false,
             )
         }
+
+    private suspend fun providerAvailability(provider: String, media: Media, count: Int): EpisodeAvailability = when (provider) {
+        "anikoto" -> anikotoAvailability(media, count)
+        "allanime" -> allAnime.episodeAvailability(media)
+        "animekai" -> animeKai.episodeAvailability(media)
+        "reanime" -> reanimeAvailability(media)
+        "anizone" -> anizoneAvailability(media, count)
+        "animegg" -> animeGgAvailability(media)
+        "anineko" -> aniNekoAvailability(media)
+        "2dhive" -> twoDhiveAvailability(media, count)
+        else -> error("Unsupported native provider catalog: $provider")
+    }
+
+    private suspend fun anikotoAvailability(media: Media, count: Int): EpisodeAvailability = coroutineScope {
+        fun available(audio: String, episode: Int): Boolean {
+            val ids = listOfNotNull(media.id, media.idMal).distinct()
+            return ids.any { id ->
+                val kind = if (id == media.id) "ani" else "mal"
+                val url = "https://megaplay.buzz/stream/$kind/$id/$episode/$audio"
+                val page = runCatching { getText(url, mapOf("Referer" to "https://hianimes.re/")) }.getOrDefault("")
+                megaPlayPageAvailable(page)
+            }
+        }
+        // Sub and dub availability are independent binary searches; probe them concurrently.
+        val sub = async(Dispatchers.IO) { highestAvailable(count) { available("sub", it) } }
+        val dub = async(Dispatchers.IO) { highestAvailable(count) { available("dub", it) } }
+        EpisodeAvailability.counts(sub.await(), dub.await())
+    }
+
+    private fun reanimeAvailability(media: Media): EpisodeAvailability {
+        val base = "https://reanime.to"
+        val results = titles(media).flatMap { query ->
+            val root = runCatching {
+                getJson("$base/api/v1/search?q=${enc(query)}&limit=20&offset=0") as? JsonObject
+            }.getOrNull()
+            (root?.get("results") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
+        }.distinctBy { it.string("anime_id") }
+        val chosen = results.maxByOrNull { item ->
+            val title = item["title"] as? JsonObject
+            titles(media).maxOfOrNull { expected ->
+                maxOf(
+                    NativeProviderParsers.titleSelectionScore(expected, title?.string("english").orEmpty()),
+                    NativeProviderParsers.titleSelectionScore(expected, title?.string("romaji").orEmpty()),
+                    NativeProviderParsers.titleSelectionScore(expected, title?.string("native").orEmpty()),
+                )
+            } ?: 0.0
+        } ?: error("ReAnime match not found")
+        val sub = chosen.number("subbed")?.toInt() ?: 0
+        val dub = chosen.number("dubbed")?.toInt() ?: 0
+        val availability = EpisodeAvailability.counts(sub, dub)
+        return availability.copy(
+            dub = availability.dub.filterNot { episode -> media.id to episode in REANIME_BAD_DUB_MUXES }.toSet(),
+        )
+    }
+
+    private fun anizoneAvailability(media: Media, airedCount: Int): EpisodeAvailability {
+        val page = getText("https://anizone.to/anime/${anizoneSlug(media)}")
+        val pageCount = NativeProviderParsers.labelledEpisodeCount(page)
+            ?: error("AniZone returned no episode count")
+        return EpisodeAvailability.counts(minOf(pageCount, airedCount), 0)
+    }
+
+    private fun animeGgAvailability(media: Media): EpisodeAvailability {
+        val page = getText("https://www.animegg.org/series/${animeGgSlug(media)}")
+        return NativeProviderParsers.animeGgEpisodes(page).also {
+            if (it.sub.isEmpty() && it.dub.isEmpty()) error("AnimeGG returned no episode catalog")
+        }
+    }
+
+    private fun aniNekoAvailability(media: Media): EpisodeAvailability {
+        val page = getText("https://anineko.to/watch/${aniNekoSlug(media)}")
+        return NativeProviderParsers.aniNekoEpisodes(page).also {
+            if (it.sub.isEmpty() && it.dub.isEmpty()) error("AniNeko returned no episode catalog")
+        }
+    }
+
+    private suspend fun twoDhiveAvailability(media: Media, fallbackCount: Int): EpisodeAvailability = coroutineScope {
+        val malId = media.idMal ?: error("2Dhive needs a MyAnimeList id")
+        fun props(episode: Int): JsonObject? = runCatching {
+            extractAstroProps(getText("https://2dhive.com/episode?anime=$malId&ep_num=$episode"))
+        }.getOrNull()
+        val first = props(1)
+        val total = first?.number("totalEpisodes")?.toInt()?.takeIf { it > 0 } ?: fallbackCount
+        fun available(audio: String, episode: Int): Boolean {
+            val current = if (episode == 1) first else first?.let { props(episode) }
+            val has2dHiveServer = (current?.get("servers") as? JsonArray).orEmpty().any { element ->
+                val server = element as? JsonObject
+                val isDub = (server?.get("dub") as? JsonPrimitive)?.booleanOrNull == true
+                isDub == (audio == "dub")
+            }
+            return has2dHiveServer || run {
+                val page = runCatching {
+                    getText(
+                        "https://megaplay.buzz/stream/mal/$malId/$episode/$audio",
+                        mapOf("Referer" to "https://2dhive.com/"),
+                    )
+                }.getOrDefault("")
+                megaPlayPageAvailable(page)
+            }
+        }
+        // Sub and dub availability are independent binary searches; probe them concurrently.
+        val subDeferred = async(Dispatchers.IO) { highestAvailable(total) { episode -> available("sub", episode) } }
+        val dubDeferred = async(Dispatchers.IO) { highestAvailable(total) { episode -> available("dub", episode) } }
+        val sub = subDeferred.await()
+        val dub = dubDeferred.await()
+        if (sub == 0 && dub == 0) error("2Dhive returned no playable episode catalog")
+        EpisodeAvailability.counts(sub, dub)
+    }
+
+    private fun highestAvailable(limit: Int, available: (Int) -> Boolean): Int {
+        if (limit <= 0 || !available(1)) return 0
+        if (limit == 1 || available(limit)) return limit
+        var low = 1
+        var high = limit - 1
+        while (low < high) {
+            val middle = (low + high + 1) / 2
+            if (available(middle)) low = middle else high = middle - 1
+        }
+        return low
+    }
+
+    private fun megaPlayPageAvailable(page: String): Boolean = page.isNotBlank() &&
+        !Regex("""<title>\s*Error\b|\berror-container\b""", RegexOption.IGNORE_CASE).containsMatchIn(page) &&
+        (page.data("id") != null || Regex("""<iframe\b[^>]*src=["'][^"']+["']""", RegexOption.IGNORE_CASE).containsMatchIn(page))
 
     // ---- AniKoto / MegaPlay ---------------------------------------------------------------
 
@@ -121,7 +269,9 @@ class AnivexaClient(
         }
 
         val streams = result.streams.toMutableList()
-        streams += stream(result.embedUrl, "embed", "MegaPlay embed", "${result.origin}/", active = streams.isEmpty())
+        if (result.embedAvailable) {
+            streams += stream(result.embedUrl, "embed", "MegaPlay embed", "${result.origin}/", active = streams.isEmpty())
+        }
         return SourcesResult(streams.distinctBy { it.url }, result.subtitles.distinctBy { it.url }, result.skip, null)
     }
 
@@ -169,7 +319,14 @@ class AnivexaClient(
             }
             skip = skipTimes(source) ?: skip
         }
-        return MegaPlayResult(embedUrl, origin, streams.distinctBy { it.url }, subtitles.distinctBy { it.url }, skip)
+        return MegaPlayResult(
+            embedUrl,
+            origin,
+            streams.distinctBy { it.url },
+            subtitles.distinctBy { it.url },
+            skip,
+            embedAvailable = megaPlayPageAvailable(page),
+        )
     }
 
     private fun anikotoSiteEmbed(media: Media, audio: String, episode: Int): MegaPlayEmbed? {
@@ -283,6 +440,9 @@ class AnivexaClient(
     // ---- ReAnime --------------------------------------------------------------------------
 
     private suspend fun reanime(media: Media, audio: String, episode: Int): SourcesResult {
+        if (audio == "dub" && (media.id to episode) in REANIME_BAD_DUB_MUXES) {
+            error("ReAnime episode $episode DUB has a known unsynchronized audio track")
+        }
         val base = "https://reanime.to"
         val flix = runCatching { getJson("$base/api/flix/${media.id}/$episode") as? JsonObject }.getOrNull()
         val links = (flix?.get("servers") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
@@ -312,14 +472,14 @@ class AnivexaClient(
             .getOrNull()
 
         val streams = mutableListOf<StreamItem>()
-        if (!nativeHls.isNullOrBlank()) {
+        if (nativeHls != null) {
             streams += stream(
-                nativeHls,
+                nativeHls.url,
                 "hls",
                 "${primary.name} native",
                 "${origin(primary.url)}/",
                 active = true,
-            )
+            ).copy(playlistKey = nativeHls.playlistKey)
         }
         embeds.take(4).forEachIndexed { index, embed ->
             streams += stream(
@@ -339,7 +499,26 @@ class AnivexaClient(
 
     private fun anizone(media: Media, episode: Int): SourcesResult {
         val base = "https://anizone.to"
-        val slug = resolveSlug("anizone", media) { query ->
+        val slug = anizoneSlug(media)
+        val pageUrl = "$base/anime/$slug/$episode"
+        val html = getText(pageUrl, mapOf("Referer" to "$base/anime/$slug"))
+        val hls = Regex("""<media-player[^>]+src=["']([^"']+\.m3u8[^"']*)["']""", RegexOption.IGNORE_CASE)
+            .find(html)?.groupValues?.get(1)?.let(NativeProviderParsers::decodeEntities)
+            ?: NativeProviderParsers.hlsUrls(html).firstOrNull()
+            ?: error("AniZone episode $episode has no HLS stream")
+        val subtitles = Regex("""<track\b([^>]*)>""", RegexOption.IGNORE_CASE).findAll(html).mapNotNull { match ->
+            val tag = match.value
+            if (!NativeProviderParsers.attr(tag, "kind").equals("subtitles", true)) return@mapNotNull null
+            val url = NativeProviderParsers.attr(tag, "src").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val label = NativeProviderParsers.attr(tag, "label").ifBlank { "Subtitle" }
+            SubtitleItem(NativeProviderParsers.absoluteUrl(base, url), label, NativeProviderParsers.attr(tag, "srclang").ifBlank { language(label) })
+        }.toList()
+        return SourcesResult(listOf(stream(hls, "hls", "AniZone", pageUrl, true)), subtitles, null, null)
+    }
+
+    private fun anizoneSlug(media: Media): String {
+        val base = "https://anizone.to"
+        return resolveSlug("anizone", media) { query ->
             val html = getText("$base/anime?search=${enc(query)}")
             val animeLinks = Regex(
                 """href=["'](?:https://anizone\.to)?/anime/([a-z0-9-]+)(?:[/?#][^"']*)?["']""",
@@ -361,38 +540,13 @@ class AnivexaClient(
                 .distinctBy { it.slug }
                 .toList()
         }
-        val pageUrl = "$base/anime/$slug/$episode"
-        val html = getText(pageUrl, mapOf("Referer" to "$base/anime/$slug"))
-        val hls = Regex("""<media-player[^>]+src=["']([^"']+\.m3u8[^"']*)["']""", RegexOption.IGNORE_CASE)
-            .find(html)?.groupValues?.get(1)?.let(NativeProviderParsers::decodeEntities)
-            ?: NativeProviderParsers.hlsUrls(html).firstOrNull()
-            ?: error("AniZone episode $episode has no HLS stream")
-        val subtitles = Regex("""<track\b([^>]*)>""", RegexOption.IGNORE_CASE).findAll(html).mapNotNull { match ->
-            val tag = match.value
-            if (!NativeProviderParsers.attr(tag, "kind").equals("subtitles", true)) return@mapNotNull null
-            val url = NativeProviderParsers.attr(tag, "src").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-            val label = NativeProviderParsers.attr(tag, "label").ifBlank { "Subtitle" }
-            SubtitleItem(NativeProviderParsers.absoluteUrl(base, url), label, NativeProviderParsers.attr(tag, "srclang").ifBlank { language(label) })
-        }.toList()
-        return SourcesResult(listOf(stream(hls, "hls", "AniZone", pageUrl, true)), subtitles, null, null)
     }
 
     // ---- AnimeGG --------------------------------------------------------------------------
 
     private fun animegg(media: Media, audio: String, episode: Int): SourcesResult {
         val base = "https://www.animegg.org"
-        val slug = resolveSlug("animegg", media) { query ->
-            val html = getText("$base/search/?q=${enc(query)}")
-            Regex("""<a\b([^>]*class=["'][^"']*\bmse\b[^"']*["'][^>]*)>([\s\S]*?)</a>""", RegexOption.IGNORE_CASE)
-                .findAll(html)
-                .mapNotNull { match ->
-                    val href = NativeProviderParsers.attr(match.groupValues[1], "href")
-                    val id = Regex("""^/series/([^/?#]+)""").find(href)?.groupValues?.get(1) ?: return@mapNotNull null
-                    val strong = Regex("""<strong[^>]*>([\s\S]*?)</strong>""", RegexOption.IGNORE_CASE)
-                        .find(match.groupValues[2])?.groupValues?.get(1)
-                    Candidate(id, strong?.let(NativeProviderParsers::stripTags) ?: id.replace('-', ' '))
-                }.toList()
-        }
+        val slug = animeGgSlug(media)
         val series = getText("$base/series/$slug")
         val episodeSlug = Regex("""<li\b[^>]*>([\s\S]*?)</li>""", RegexOption.IGNORE_CASE).findAll(series).mapNotNull { match ->
             val block = match.groupValues[1]
@@ -420,34 +574,45 @@ class AnivexaClient(
         tabs.take(4).forEachIndexed { index, (id, server) ->
             val embed = "$base/embed/$id"
             val embedHtml = runCatching { getText(embed, mapOf("Referer" to base)) }.getOrDefault("")
-            NativeProviderParsers.hlsUrls(embedHtml).forEach { url ->
+            val hlsUrls = NativeProviderParsers.hlsUrls(embedHtml)
+            hlsUrls.forEach { url ->
                 streams += stream(NativeProviderParsers.absoluteUrl(base, url), "hls", server, embed, streams.isEmpty())
             }
             // AnimeGG serves progressive MP4s through jwplayer (`file: "/play/.../video.mp4?for=..."`).
-            Regex("""file:\s*["']([^"']+\.mp4[^"']*)["']""", RegexOption.IGNORE_CASE)
-                .findAll(embedHtml).forEach { match ->
-                    val url = NativeProviderParsers.absoluteUrl(base, match.groupValues[1])
-                    streams += stream(url, "video", server, embed, streams.isEmpty())
-                }
-            streams += stream(embed, "embed", "$server embed", embed, streams.isEmpty() && index == 0)
+            val mp4Urls = Regex("""file:\s*["']([^"']+\.mp4[^"']*)["']""", RegexOption.IGNORE_CASE)
+                .findAll(embedHtml).map { it.groupValues[1] }.toList()
+            mp4Urls.forEach { rawUrl ->
+                val url = NativeProviderParsers.absoluteUrl(base, rawUrl)
+                streams += stream(url, "video", server, embed, streams.isEmpty())
+            }
+            if (animeGgEmbedCanPlay(embedHtml, hlsUrls.isNotEmpty() || mp4Urls.isNotEmpty())) {
+                streams += stream(embed, "embed", "$server embed", embed, streams.isEmpty() && index == 0)
+            }
         }
         return SourcesResult(streams.distinctBy { it.url }, emptyList(), null, null)
+    }
+
+    private fun animeGgSlug(media: Media): String {
+        val base = "https://www.animegg.org"
+        return resolveSlug("animegg", media) { query ->
+            val html = getText("$base/search/?q=${enc(query)}")
+            Regex("""<a\b([^>]*class=["'][^"']*\bmse\b[^"']*["'][^>]*)>([\s\S]*?)</a>""", RegexOption.IGNORE_CASE)
+                .findAll(html)
+                .mapNotNull { match ->
+                    val href = NativeProviderParsers.attr(match.groupValues[1], "href")
+                    val id = Regex("""^/series/([^/?#]+)""").find(href)?.groupValues?.get(1) ?: return@mapNotNull null
+                    val strong = Regex("""<strong[^>]*>([\s\S]*?)</strong>""", RegexOption.IGNORE_CASE)
+                        .find(match.groupValues[2])?.groupValues?.get(1)
+                    Candidate(id, strong?.let(NativeProviderParsers::stripTags) ?: id.replace('-', ' '))
+                }.toList()
+        }
     }
 
     // ---- AniNeko --------------------------------------------------------------------------
 
     private fun anineko(media: Media, audio: String, episode: Int): SourcesResult {
         val base = "https://anineko.to"
-        val slug = resolveSlug("anineko", media) { query ->
-            val html = getText("$base/browser?keyword=${enc(query)}")
-            Regex("""<a\b([^>]*class=["'][^"']*nv-anime-thumb[^"']*["'][^>]*)>([\s\S]*?)</a>""", RegexOption.IGNORE_CASE)
-                .findAll(html)
-                .mapNotNull { match ->
-                    val href = NativeProviderParsers.attr(match.groupValues[1], "href")
-                    val id = Regex("""/watch/([^/?#]+)""").find(href)?.groupValues?.get(1) ?: return@mapNotNull null
-                    Candidate(id, NativeProviderParsers.stripTags(match.groupValues[2]).ifBlank { id.replace('-', ' ') })
-                }.toList()
-        }
+        val slug = aniNekoSlug(media)
         val watchUrl = "$base/watch/$slug/ep-$episode"
         val html = getText(watchUrl, mapOf("Referer" to "$base/watch/$slug"))
         val embeds = mutableListOf<String>()
@@ -470,6 +635,20 @@ class AnivexaClient(
             streams += stream(embed, "embed", "AniNeko embed", embed, streams.isEmpty() && index == 0)
         }
         return SourcesResult(streams.distinctBy { it.url }, subtitles.distinctBy { it.url }, null, null)
+    }
+
+    private fun aniNekoSlug(media: Media): String {
+        val base = "https://anineko.to"
+        return resolveSlug("anineko", media) { query ->
+            val html = getText("$base/browser?keyword=${enc(query)}")
+            Regex("""<a\b([^>]*class=["'][^"']*nv-anime-thumb[^"']*["'][^>]*)>([\s\S]*?)</a>""", RegexOption.IGNORE_CASE)
+                .findAll(html)
+                .mapNotNull { match ->
+                    val href = NativeProviderParsers.attr(match.groupValues[1], "href")
+                    val id = Regex("""/watch/([^/?#]+)""").find(href)?.groupValues?.get(1) ?: return@mapNotNull null
+                    Candidate(id, NativeProviderParsers.stripTags(match.groupValues[2]).ifBlank { id.replace('-', ' ') })
+                }.toList()
+        }
     }
 
     /**
@@ -539,7 +718,13 @@ class AnivexaClient(
             }
         }
         val embed = "https://megaplay.buzz/stream/mal/$malId/$episode/${if (audio == "dub") "dub" else "sub"}"
-        streams += stream(embed, "embed", "2Dhive MegaPlay", referer, streams.isEmpty())
+        runCatching { megaPlaySources(MegaPlayEmbed(embed, referer, null)) }.getOrNull()?.let { megaPlay ->
+            streams += megaPlay.streams
+            subtitles += megaPlay.subtitles
+            if (megaPlay.embedAvailable) {
+                streams += stream(megaPlay.embedUrl, "embed", "2Dhive MegaPlay", referer, streams.isEmpty())
+            }
+        }
         return SourcesResult(streams, subtitles, null, null)
     }
 
@@ -565,8 +750,8 @@ class AnivexaClient(
     )
 
     private fun candidateScore(media: Media, candidate: Candidate): Double {
-        var score = titles(media).maxOfOrNull { NativeProviderParsers.titleScore(it, candidate.title) } ?: 0.0
-        score = maxOf(score, titles(media).maxOfOrNull { NativeProviderParsers.titleScore(it, candidate.slug) } ?: 0.0)
+        var score = titles(media).maxOfOrNull { NativeProviderParsers.titleSelectionScore(it, candidate.title) } ?: 0.0
+        score = maxOf(score, titles(media).maxOfOrNull { NativeProviderParsers.titleSelectionScore(it, candidate.slug) } ?: 0.0)
         media.seasonYear?.let { year ->
             val candidateYear = Regex("""\b(19|20)\d{2}\b""").find(candidate.title)?.value?.toIntOrNull()
             if (candidateYear != null) score *= if (candidateYear == year) 1.15 else 0.55
@@ -675,7 +860,21 @@ class AnivexaClient(
     private fun JsonObject.number(name: String): Double? = (this[name] as? JsonPrimitive)?.doubleOrNull
 
     companion object {
+        private const val CATALOG_TIMEOUT_MS = 15_000L
+        private val REANIME_BAD_DUB_MUXES = setOf(113415 to 2)
         private const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
     }
+}
+
+internal fun animeGgEmbedCanPlay(html: String, hasExtractedMedia: Boolean): Boolean {
+    if (hasExtractedMedia) return true
+    if (html.isBlank()) return false
+    val explicitlyEmpty = Regex(
+        """\b(?:var|let|const)\s+videoSources\s*=\s*\[\s*]\s*;?""",
+        RegexOption.IGNORE_CASE,
+    ).containsMatchIn(html)
+    if (explicitlyEmpty) return false
+    return html.contains("jwplayer", ignoreCase = true) ||
+        Regex("""<iframe\b[^>]*src=["'][^"']+["']""", RegexOption.IGNORE_CASE).containsMatchIn(html)
 }

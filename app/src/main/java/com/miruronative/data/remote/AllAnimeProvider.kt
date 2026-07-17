@@ -36,9 +36,17 @@ internal class AllAnimeProvider(
         val title: String,
         val englishTitle: String?,
         val malId: Int?,
+        val availableSub: Int,
+        val availableDub: Int,
     )
 
     private val showIds = ConcurrentHashMap<Int, String>()
+
+    fun episodeAvailability(media: Media): EpisodeAvailability {
+        val candidate = resolveCandidate(media, "sub")
+        showIds[media.id] = candidate.id
+        return EpisodeAvailability.counts(candidate.availableSub, candidate.availableDub)
+    }
 
     fun sources(media: Media, audio: String, episode: Int): SourcesResult {
         val showId = showIds[media.id] ?: resolveShow(media, audio).also { showIds[media.id] = it }
@@ -74,10 +82,14 @@ internal class AllAnimeProvider(
     }
 
     private fun resolveShow(media: Media, audio: String): String {
+        return resolveCandidate(media, audio).id
+    }
+
+    private fun resolveCandidate(media: Media, audio: String): Candidate {
         val candidates = titles(media).flatMap { title ->
             runCatching { search(title, audio, media.isAdult) }.getOrDefault(emptyList())
         }.distinctBy(Candidate::id)
-        media.idMal?.let { malId -> candidates.firstOrNull { it.malId == malId }?.let { return it.id } }
+        media.idMal?.let { malId -> candidates.firstOrNull { it.malId == malId }?.let { return it } }
 
         val chosen = candidates.maxByOrNull { candidate ->
             titles(media).maxOfOrNull { title ->
@@ -94,7 +106,7 @@ internal class AllAnimeProvider(
             )
         } ?: 0.0
         if (score < 0.35) error("AllAnime title match was too weak")
-        return chosen.id
+        return chosen
     }
 
     private fun search(query: String, audio: String, allowAdult: Boolean): List<Candidate> {
@@ -120,6 +132,8 @@ internal class AllAnimeProvider(
                 title = item.string("name") ?: id,
                 englishTitle = item.string("englishName"),
                 malId = item.int("malId"),
+                availableSub = ((item["availableEpisodes"] as? JsonObject)?.int("sub") ?: 0),
+                availableDub = ((item["availableEpisodes"] as? JsonObject)?.int("dub") ?: 0),
             )
         }
     }

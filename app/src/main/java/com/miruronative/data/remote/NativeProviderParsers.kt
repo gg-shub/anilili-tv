@@ -9,6 +9,18 @@ internal data class NativeEpisodeRequest(
     val episode: Int,
 )
 
+internal data class EpisodeAvailability(
+    val sub: Set<Int>,
+    val dub: Set<Int>,
+) {
+    companion object {
+        fun counts(sub: Int, dub: Int): EpisodeAvailability = EpisodeAvailability(
+            sub = if (sub > 0) (1..sub).toSet() else emptySet(),
+            dub = if (dub > 0) (1..dub).toSet() else emptySet(),
+        )
+    }
+}
+
 internal object NativeProviderParsers {
     private val episodePath = Regex(
         "^watch/([a-z0-9]+)/(\\d+)/(sub|dub)/[a-z0-9]+-(\\d+)$",
@@ -87,6 +99,16 @@ internal object NativeProviderParsers {
         return (2.0 * hits) / ((a.length - 1) + (b.length - 1))
     }
 
+    /** Adds a specificity tie-breaker so a base series beats similarly named sequels/spinoffs. */
+    fun titleSelectionScore(query: String, candidate: String): Double {
+        val similarity = titleScore(query, candidate)
+        val a = normalize(query)
+        val b = normalize(candidate)
+        if (a.isBlank() || b.isBlank() || a == b) return similarity
+        val lengthRatio = minOf(a.length, b.length).toDouble() / maxOf(a.length, b.length)
+        return similarity * (0.6 + 0.4 * lengthRatio)
+    }
+
     fun absoluteUrl(base: String, value: String): String {
         if (value.startsWith("http://") || value.startsWith("https://")) return value
         return runCatching { URI(base).resolve(value).toString() }.getOrDefault(value)
@@ -100,4 +122,55 @@ internal object NativeProviderParsers {
         .map { if (it.startsWith("//")) "https:$it" else it }
         .distinct()
         .toList()
+
+    fun dataAudioEpisodes(html: String): EpisodeAvailability {
+        val sub = linkedSetOf<Int>()
+        val dub = linkedSetOf<Int>()
+        Regex("""<a\b[^>]*\bdata-(?:num|slug)\s*=\s*(["'])\d+\1[^>]*>""", RegexOption.IGNORE_CASE)
+            .findAll(html)
+            .forEach { match ->
+                val tag = match.value
+                val number = attr(tag, "data-num").toIntOrNull()
+                    ?: attr(tag, "data-slug").toIntOrNull()
+                    ?: return@forEach
+                if (attr(tag, "data-sub") == "1" || attr(tag, "data-hsub") == "1") sub += number
+                if (attr(tag, "data-dub") == "1") dub += number
+            }
+        return EpisodeAvailability(sub, dub)
+    }
+
+    fun animeGgEpisodes(html: String): EpisodeAvailability {
+        val sub = linkedSetOf<Int>()
+        val dub = linkedSetOf<Int>()
+        Regex("""<li\b[^>]*>([\s\S]*?)</li>""", RegexOption.IGNORE_CASE).findAll(html).forEach { match ->
+            val block = match.groupValues[1]
+            if (!block.contains("anm_det_pop", ignoreCase = true)) return@forEach
+            val number = Regex("""<strong[^>]*>[\s\S]*?(\d+)\s*</strong>""", RegexOption.IGNORE_CASE)
+                .find(block)?.groupValues?.get(1)?.toIntOrNull() ?: return@forEach
+            if (block.contains("btn-subbed", ignoreCase = true)) sub += number
+            if (block.contains("btn-dubbed", ignoreCase = true)) dub += number
+        }
+        return EpisodeAvailability(sub, dub)
+    }
+
+    fun aniNekoEpisodes(html: String): EpisodeAvailability {
+        val sub = linkedSetOf<Int>()
+        val dub = linkedSetOf<Int>()
+        Regex(
+            """<article\b[^>]*class=["'][^"']*nv-info-episode-item[^"']*["'][^>]*>([\s\S]*?)</article>""",
+            RegexOption.IGNORE_CASE,
+        ).findAll(html).forEach { match ->
+            val block = match.groupValues[1]
+            val number = Regex("""/ep-(\d+)""", RegexOption.IGNORE_CASE)
+                .find(block)?.groupValues?.get(1)?.toIntOrNull() ?: return@forEach
+            if (Regex(""">\s*(?:SUB|HSUB)\s*<""", RegexOption.IGNORE_CASE).containsMatchIn(block)) sub += number
+            if (Regex(""">\s*DUB\s*<""", RegexOption.IGNORE_CASE).containsMatchIn(block)) dub += number
+        }
+        return EpisodeAvailability(sub, dub)
+    }
+
+    fun labelledEpisodeCount(html: String): Int? = Regex(
+        """\b(\d+)\s+Episodes\b""",
+        RegexOption.IGNORE_CASE,
+    ).find(html)?.groupValues?.get(1)?.toIntOrNull()
 }

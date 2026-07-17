@@ -55,6 +55,7 @@ data class StreamItem(
     val isActive: Boolean,
     val width: Int?,
     val height: Int?,
+    val playlistKey: String? = null,
 ) {
     val isHls: Boolean get() = type.equals("hls", true) || url.contains(".m3u8")
     val isEmbed: Boolean get() = type.equals("embed", true)
@@ -63,6 +64,7 @@ data class StreamItem(
 
 data class SubtitleItem(val url: String, val label: String, val language: String)
 
+@Serializable
 data class SkipTimes(
     val introStart: Double?,
     val introEnd: Double?,
