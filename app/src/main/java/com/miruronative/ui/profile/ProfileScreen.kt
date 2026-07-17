@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExpandMore
@@ -50,6 +49,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.focus.FocusManager
+import androidx.compose.foundation.focusGroup
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -59,6 +62,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.focus.FocusDirection
 import com.miruronative.data.auth.AuthManager
 import com.miruronative.data.library.HistoryEntry
 import com.miruronative.data.library.LibraryStore
@@ -134,7 +145,6 @@ fun ProfileScreen(
     var selectedViewName by rememberSaveable { mutableStateOf(LibraryView.WATCHLIST.name) }
     var selectedFormat by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedAiring by rememberSaveable { mutableStateOf<String?>(null) }
-    var titleFilter by rememberSaveable { mutableStateOf("") }
 
     LaunchedEffect(token) {
         if (token == null) selectedViewName = LibraryView.WATCHLIST.name
@@ -154,7 +164,7 @@ fun ProfileScreen(
         buildCombinedWatchlist(profile, watchlist, history)
     }
     val selectedView = LibraryView.valueOf(selectedViewName)
-    val selectedCards = remember(profile, combinedWatchlist, selectedView, selectedFormat, selectedAiring, titleFilter) {
+    val selectedCards = remember(profile, combinedWatchlist, selectedView, selectedFormat, selectedAiring) {
         val source = when (selectedView) {
             LibraryView.WATCHLIST -> combinedWatchlist
             LibraryView.WATCHING -> aniListCards(profile?.watching.orEmpty())
@@ -165,8 +175,7 @@ fun ProfileScreen(
         }
         source.filter { entry ->
             (selectedFormat == null || entry.format == selectedFormat) &&
-                (selectedAiring == null || entry.airingStatus == selectedAiring) &&
-                (titleFilter.isBlank() || entry.title.contains(titleFilter, ignoreCase = true))
+                (selectedAiring == null || entry.airingStatus == selectedAiring)
         }
     }
     Scaffold(
@@ -183,6 +192,7 @@ fun ProfileScreen(
             onRefresh = vm::refresh,
             modifier = Modifier.padding(padding).fillMaxSize(),
         ) {
+            val gridFocus = remember { androidx.compose.ui.focus.FocusRequester() }
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 28.dp),
@@ -210,10 +220,9 @@ fun ProfileScreen(
                     onFormatChange = { selectedFormat = it },
                     selectedAiring = selectedAiring,
                     onAiringChange = { selectedAiring = it },
-                    titleFilter = titleFilter,
-                    onTitleFilterChange = { titleFilter = it },
                     resultCount = selectedCards.size,
                     showAniListLists = profile != null,
+                    gridFocus = gridFocus,
                 )
             }
             item {
@@ -225,7 +234,7 @@ fun ProfileScreen(
             if (selectedCards.isEmpty()) {
                 item {
                     EmptyPanel(
-                        if (selectedView == LibraryView.WATCHLIST && selectedFormat == null && selectedAiring == null && titleFilter.isBlank()) {
+                        if (selectedView == LibraryView.WATCHLIST && selectedFormat == null && selectedAiring == null) {
                             "Tap the heart on any anime to save it"
                         } else {
                             "No anime match these filters"
@@ -235,7 +244,7 @@ fun ProfileScreen(
             } else {
                 item {
                     LazyRow(
-                        modifier = Modifier.focusGroup(),
+                        modifier = Modifier.focusGroup().focusRequester(gridFocus),
                         contentPadding = PaddingValues(horizontal = device.pagePadding),
                         horizontalArrangement = Arrangement.spacedBy(if (device.isTv) 18.dp else 12.dp),
                     ) {
@@ -275,7 +284,7 @@ private fun ProfileHero(
     onLogout: () -> Unit,
 ) {
     val device = LocalAppDeviceProfile.current
-    val shape = RoundedCornerShape(12.dp)
+    val shape = RectangleShape
     Column(
         Modifier
             .fillMaxWidth()
@@ -293,7 +302,7 @@ private fun ProfileHero(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 5.dp),
                 )
-                Button(onClick = onLogin, modifier = Modifier.padding(top = 16.dp).focusHighlight(RoundedCornerShape(9.dp))) {
+                Button(onClick = onLogin, modifier = Modifier.padding(top = 16.dp).focusHighlight(RectangleShape)) {
                     Text("Login with AniList", fontWeight = FontWeight.Bold)
                 }
             }
@@ -325,9 +334,9 @@ private fun ProfileHero(
                             .align(Alignment.BottomStart)
                             .padding(16.dp)
                             .size(if (device.isTv) 104.dp else 88.dp)
-                            .clip(RoundedCornerShape(14.dp))
+                            .clip(RectangleShape)
                             .background(MaterialTheme.colorScheme.surfaceVariant)
-                            .border(2.dp, MaterialTheme.colorScheme.onSurface, RoundedCornerShape(14.dp)),
+                            .border(2.dp, MaterialTheme.colorScheme.onSurface, RectangleShape),
                         contentScale = ContentScale.Crop,
                     )
                 }
@@ -343,10 +352,10 @@ private fun ProfileHero(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    IconButton(onClick = onSync, modifier = Modifier.focusHighlight(RoundedCornerShape(9.dp))) {
+                    IconButton(onClick = onSync, modifier = Modifier.focusHighlight(RectangleShape)) {
                         Icon(Icons.Default.Refresh, contentDescription = "Sync AniList")
                     }
-                    IconButton(onClick = onLogout, modifier = Modifier.focusHighlight(RoundedCornerShape(9.dp))) {
+                    IconButton(onClick = onLogout, modifier = Modifier.focusHighlight(RectangleShape)) {
                         Icon(Icons.Default.Close, contentDescription = "Logout")
                     }
                 }
@@ -394,10 +403,9 @@ private fun LibraryFilters(
     onFormatChange: (String?) -> Unit,
     selectedAiring: String?,
     onAiringChange: (String?) -> Unit,
-    titleFilter: String,
-    onTitleFilterChange: (String) -> Unit,
     resultCount: Int,
     showAniListLists: Boolean,
+    gridFocus: androidx.compose.ui.focus.FocusRequester? = null,
 ) {
     val device = LocalAppDeviceProfile.current
     val viewOptions = (if (showAniListLists) LibraryView.entries else listOf(LibraryView.WATCHLIST))
@@ -424,18 +432,6 @@ private fun LibraryFilters(
                     modifier = Modifier.weight(1f),
                 )
             }
-            OutlinedTextField(
-                value = titleFilter,
-                onValueChange = onTitleFilterChange,
-                modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("Filter by title") },
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                trailingIcon = if (titleFilter.isNotEmpty()) {
-                    { IconButton(onClick = { onTitleFilterChange("") }) { Icon(Icons.Default.Close, contentDescription = "Clear title filter") } }
-                } else null,
-                shape = RoundedCornerShape(9.dp),
-                singleLine = true,
-            )
             Text(
                 "$resultCount anime",
                 style = MaterialTheme.typography.labelMedium,
@@ -455,8 +451,8 @@ private fun SelectorField(
     var expanded by remember { mutableStateOf(false) }
     Box(modifier) {
         Surface(
-            modifier = Modifier.fillMaxWidth().focusHighlight(RoundedCornerShape(9.dp)).clickable { expanded = true },
-            shape = RoundedCornerShape(9.dp),
+            modifier = Modifier.fillMaxWidth().focusHighlight(RectangleShape).clickable { expanded = true },
+            shape = RectangleShape,
             color = MaterialTheme.colorScheme.background,
             border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
         ) {
@@ -493,7 +489,7 @@ private fun HistoryCard(entry: HistoryEntry, onResume: (HistoryEntry) -> Unit) {
     val device = LocalAppDeviceProfile.current
     Column(Modifier.width(device.posterWidth).focusHighlight().clickable { onResume(entry) }) {
         Box(
-            Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(9.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
+            Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RectangleShape).background(MaterialTheme.colorScheme.surfaceVariant),
         ) {
             AsyncImage(entry.cover, entry.title, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             Icon(Icons.Default.PlayArrow, contentDescription = "Resume", tint = Color.White, modifier = Modifier.align(Alignment.Center))
@@ -511,7 +507,7 @@ private fun SavedAnimeCard(entry: SavedAnimeCardData, onAnimeClick: (Int) -> Uni
     val device = LocalAppDeviceProfile.current
     Column(Modifier.width(device.posterWidth).focusHighlight().clickable { onAnimeClick(entry.id) }) {
         Box(
-            Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(9.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
+            Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RectangleShape).background(MaterialTheme.colorScheme.surfaceVariant),
         ) {
             AsyncImage(entry.cover, entry.title, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             when {
@@ -550,7 +546,7 @@ private fun SavedAnimeCard(entry: SavedAnimeCardData, onAnimeClick: (Int) -> Uni
 private fun CornerBadge(text: String, modifier: Modifier = Modifier) {
     Surface(
         modifier = modifier,
-        shape = RoundedCornerShape(5.dp),
+        shape = RectangleShape,
         color = Color.Black.copy(alpha = .82f),
     ) {
         Text(
@@ -573,7 +569,7 @@ private fun EmptyPanel(text: String) {
 
 @Composable
 private fun Panel(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
-    val shape = RoundedCornerShape(10.dp)
+    val shape = RectangleShape
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = shape,
@@ -664,4 +660,25 @@ private fun String.toDisplayLabel(): String = when (this) {
     "PLANNING" -> "Planning"
     "PAUSED" -> "Paused"
     else -> lowercase().replace('_', ' ').replaceFirstChar { it.titlecase(Locale.getDefault()) }
+}
+
+/** TV: text fields consume D-pad Down; hand focus to the next element manually. */
+@Composable
+private fun Modifier.tvEscapeDown(target: androidx.compose.ui.focus.FocusRequester? = null): Modifier {
+    val device = LocalAppDeviceProfile.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+    return this.onPreviewKeyEvent { event ->
+        if (device.isTv && event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
+            keyboard?.hide()
+            if (target != null) {
+                try { target.requestFocus() } catch (e: Exception) {}
+            } else {
+                focusManager.moveFocus(FocusDirection.Down)
+            }
+            true
+        } else {
+            false
+        }
+    }
 }

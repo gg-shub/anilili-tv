@@ -1,5 +1,7 @@
 package com.miruronative.ui.detail
 
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -11,6 +13,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -18,26 +21,29 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material3.Button
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -52,16 +58,20 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.draw.blur
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.compose.runtime.LaunchedEffect
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import coil.size.Size
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.RectangleShape
 import com.miruronative.data.ProviderCatalog
 import com.miruronative.data.library.LibraryStore
 import com.miruronative.data.library.WatchlistEntry
 import com.miruronative.data.model.Category
 import com.miruronative.data.model.EpisodeItem
 import com.miruronative.data.model.Media
-import com.miruronative.data.model.contentAdvisory
 import com.miruronative.ui.UiState
 import com.miruronative.ui.components.ErrorBox
 import com.miruronative.ui.components.LoadingBox
@@ -79,307 +89,187 @@ fun DetailScreen(
 ) {
     LaunchedEffect(animeId) { vm.load(animeId) }
     val state by vm.state.collectAsState()
-    val isRefreshing by vm.isRefreshing.collectAsState()
     val watchlist by LibraryStore.watchlist.collectAsState()
-    val history by LibraryStore.history.collectAsState()
-    val info = (state as? UiState.Success)?.data?.info
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {},
-                navigationIcon = {
-                    IconButton(
-                        onClick = onBack,
-                        modifier = Modifier.focusHighlight(RoundedCornerShape(24.dp)),
-                    ) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                    }
-                },
-                actions = {
-                    if (info != null) {
-                        val saved = watchlist.any { it.anilistId == info.id }
-                        IconButton(
-                            onClick = {
-                                LibraryStore.toggleWatchlist(
-                                    WatchlistEntry(
-                                        info.id,
-                                        info.title.preferred,
-                                        info.coverImage.best,
-                                        info.format,
-                                        info.averageScore,
-                                    ),
-                                )
-                            },
-                            modifier = Modifier.focusHighlight(RoundedCornerShape(24.dp)),
-                        ) {
-                            Icon(
-                                if (saved) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
-                                contentDescription = "Watchlist",
-                                tint = if (saved) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                            )
-                        }
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background,
-                ),
-            )
-        },
-    ) { padding ->
+    Scaffold(containerColor = Color.Black) { padding ->
         when (val s = state) {
             is UiState.Loading -> LoadingBox(Modifier.padding(padding))
             is UiState.Error -> ErrorBox(s.message, { vm.load(animeId, force = true) }, Modifier.padding(padding))
-            is UiState.Success -> PullRefreshContainer(
-                isRefreshing = isRefreshing,
-                onRefresh = { vm.refresh(animeId) },
-                modifier = Modifier.padding(padding).fillMaxSize(),
-            ) {
+            is UiState.Success -> {
                 DetailContent(
                     data = s.data,
+                    watchlist = watchlist,
                     selectedProvider = vm.selectedProvider,
                     selectedCategory = vm.selectedCategory,
                     onSelectProvider = vm::selectProvider,
                     onSelectCategory = vm::selectCategory,
                     onPlay = onPlay,
-                    resume = history.firstOrNull { it.anilistId == animeId },
+                    onBack = onBack,
                 )
             }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun DetailContent(
     data: DetailData,
+    watchlist: List<WatchlistEntry>,
     selectedProvider: String?,
     selectedCategory: Category,
     onSelectProvider: (String) -> Unit,
     onSelectCategory: (Category) -> Unit,
     onPlay: (String, String, String) -> Unit,
-    resume: com.miruronative.data.library.HistoryEntry?,
-    modifier: Modifier = Modifier,
+    onBack: () -> Unit,
 ) {
-    val device = LocalAppDeviceProfile.current
     val info = data.info
-    val provider = selectedProvider?.let { data.episodes.provider(it) }
-    val episodes = provider?.episodes(selectedCategory).orEmpty()
-    val episodeRows = remember(episodes, device.episodeColumns) {
-        episodes.chunked(device.episodeColumns)
-    }
-    val visibleProviders = remember(data.episodes.providerNames, data.loadingMore) {
-        val pending = if (data.loadingMore) ProviderCatalog.anivexaProviders else emptyList()
-        (data.episodes.providerNames + pending)
-            .distinct()
-            .sortedBy(ProviderCatalog::sortKey)
-    }
-    val pendingProviders = remember(visibleProviders, data.episodes.providerNames) {
-        visibleProviders.toSet() - data.episodes.providerNames.toSet()
-    }
+    val isSaved = watchlist.any { it.anilistId == info.id }
+    
+    Box(Modifier.fillMaxSize()) {
+        // Fullscreen Background
+        AsyncImage(
+            model = ImageRequest.Builder(LocalContext.current)
+                .data(info.bannerImage ?: info.coverImage?.extraLarge)
+                .size(Size.ORIGINAL)
+                .crossfade(true)
+                .build(),
+            contentDescription = null,
+            modifier = Modifier.fillMaxSize().blur(24.dp),
+            contentScale = ContentScale.Crop,
+            filterQuality = FilterQuality.High,
+        )
+        // Background Gradient (Darker on the right where the episodes are, and at the bottom)
+        Box(
+            Modifier.fillMaxSize().background(
+                Brush.horizontalGradient(
+                    0.0f to Color.Black.copy(alpha = 0.3f),
+                    0.5f to Color.Black.copy(alpha = 0.5f),
+                    1.0f to Color.Black.copy(alpha = 0.85f),
+                )
+            )
+        )
+        Box(
+            Modifier.fillMaxSize().background(
+                Brush.verticalGradient(
+                    0.0f to Color.Transparent,
+                    1.0f to Color.Black.copy(alpha = 0.7f),
+                )
+            )
+        )
 
-    LazyColumn(modifier = modifier.fillMaxSize()) {
-        item { Header(info) }
-        item { ContentAdvisoryRow(info) }
-        item { GenreRow(info.genres) }
-        item { Description(info.description) }
+        // Content Row (Left: Info, Right: Episodes Sidebar)
+        Row(Modifier.fillMaxSize()) {
+            // Left Panel
+            Column(
+                Modifier
+                    .weight(1.3f)
+                    .fillMaxHeight()
+                    .padding(start = 48.dp, top = 32.dp, bottom = 32.dp, end = 24.dp)
+            ) {
+                Box(Modifier.padding(bottom = 24.dp)) {
+                    IconButton(
+                        onClick = onBack,
+                        modifier = Modifier.focusHighlight(CircleShape)
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+                    }
+                }
 
-        if (resume != null) {
-            item {
-                Button(
-                    onClick = { onPlay(resume.provider, resume.category, resume.episodeLabel) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = device.pagePadding, vertical = 8.dp)
-                        .focusHighlight(RoundedCornerShape(24.dp)),
+                Spacer(Modifier.weight(1f))
+
+                // Title
+                Text(
+                    text = info.title.preferred,
+                    style = MaterialTheme.typography.displayMedium,
+                    fontWeight = FontWeight.Black,
+                    color = Color.White,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                // Metadata Row
+                Row(
+                    modifier = Modifier.padding(top = 16.dp, bottom = 24.dp),
+                    horizontalArrangement = Arrangement.spacedBy(24.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(Icons.Default.PlayArrow, contentDescription = null)
-                    Text("Continue Episode ${resume.episodeLabel}", Modifier.padding(start = 6.dp))
+                    if (info.duration != null) {
+                        Text("${info.duration} min", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color.White)
+                    }
+                    if (info.seasonYear != null) {
+                        Text("${info.seasonYear}–", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color.White)
+                    }
+                    if (info.averageScore != null) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("${info.averageScore / 10.0}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color.White)
+                            Icon(Icons.Default.Star, contentDescription = null, tint = Color(0xFFFFC107), modifier = Modifier.padding(start = 4.dp).size(20.dp))
+                        }
+                    }
+                }
+
+                // Genres
+                Text("GENRES", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.5f), fontWeight = FontWeight.Bold)
+                FlowRow(Modifier.padding(top = 8.dp, bottom = 24.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    info.genres.take(3).forEach { genre ->
+                        PillBadge(genre)
+                    }
+                }
+
+                // Summary
+                Text("SUMMARY", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.5f), fontWeight = FontWeight.Bold)
+                var expanded by remember { mutableStateOf(false) }
+                val cleanDesc = remember(info.description) { info.description?.replace(Regex("<[^>]*>"), "")?.trim() ?: "No summary available." }
+                Text(
+                    text = cleanDesc,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = Color.White.copy(alpha = 0.85f),
+                    maxLines = if (expanded) Int.MAX_VALUE else 3,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .padding(top = 8.dp, bottom = 32.dp)
+                        .focusHighlight(RectangleShape)
+                        .clickable { expanded = !expanded }
+                        .animateContentSize(tween(300))
+                )
+
+                // Action Buttons Row
+                Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    // Removed Trailer button
+                    CircleActionButton(
+                        icon = if (isSaved) Icons.Default.Check else Icons.Default.Add,
+                        onClick = {
+                            LibraryStore.toggleWatchlist(
+                                WatchlistEntry(
+                                    info.id,
+                                    info.title.preferred,
+                                    info.coverImage.best,
+                                    info.format,
+                                    info.averageScore,
+                                )
+                            )
+                        }
+                    )
+                    // Removed Eye button
+                    CircleActionButton(icon = Icons.Default.Share, onClick = { /* Handle Share */ })
                 }
             }
-        }
 
-        if (visibleProviders.isNotEmpty()) {
-            item {
-                SelectorSection(
-                    providers = visibleProviders,
-                    pendingProviders = pendingProviders,
+            // Right Sidebar (Episodes & Servers)
+            Box(
+                Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .background(Color.Black.copy(alpha = 0.65f)) // Glassmorphism backdrop fallback
+            ) {
+                EpisodesSidebar(
+                    data = data,
                     selectedProvider = selectedProvider,
-                    categories = provider?.categories.orEmpty(),
                     selectedCategory = selectedCategory,
                     onSelectProvider = onSelectProvider,
                     onSelectCategory = onSelectCategory,
+                    onPlay = onPlay
                 )
-            }
-            if (selectedProvider != null && episodes.isNotEmpty()) {
-                item {
-                    Button(
-                        onClick = { onPlay(selectedProvider, selectedCategory.api, episodes.first().displayNumber) },
-                        modifier = Modifier
-                            .padding(horizontal = device.pagePadding, vertical = 4.dp)
-                            .focusHighlight(RoundedCornerShape(24.dp)),
-                    ) {
-                        Icon(Icons.Default.PlayArrow, contentDescription = null)
-                        Text("Play Episode ${episodes.first().displayNumber}", Modifier.padding(start = 6.dp))
-                    }
-                }
-                item {
-                    Text(
-                        "Episodes",
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.padding(start = device.pagePadding, top = 12.dp, bottom = 4.dp),
-                    )
-                }
-                items(episodeRows) { row ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = device.pagePadding, vertical = 5.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        row.forEach { ep ->
-                            EpisodeChip(
-                                episode = ep,
-                                modifier = Modifier.weight(1f),
-                                onClick = { onPlay(selectedProvider, selectedCategory.api, ep.displayNumber) },
-                            )
-                        }
-                        repeat(device.episodeColumns - row.size) { Spacer(Modifier.weight(1f)) }
-                    }
-                }
-            }
-        } else {
-            item {
-                Text(
-                    text = data.episodesError ?: "No streaming sources found for this title.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(device.pagePadding),
-                )
-            }
-        }
-        if (data.loadingMore) {
-            item {
-                Row(
-                    Modifier.fillMaxWidth().padding(16.dp),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                    Text("Checking more servers…", Modifier.padding(start = 10.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-        }
-        item { Spacer(Modifier.height(24.dp)) }
-    }
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun ContentAdvisoryRow(media: Media) {
-    val advisory = remember(media) { media.contentAdvisory() }
-    if (!advisory.isAdult && advisory.labels.isEmpty()) return
-    val device = LocalAppDeviceProfile.current
-    Column(Modifier.padding(horizontal = device.pagePadding, vertical = 4.dp)) {
-        Text(
-            "Content advisory",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(bottom = 5.dp),
-        )
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            if (advisory.isAdult) AdvisoryBadge("18+", adult = true)
-            advisory.labels.forEach { label -> AdvisoryBadge(label) }
-        }
-        Text(
-            "Estimated from AniList tags; not an official age rating",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 4.dp),
-        )
-    }
-}
-
-@Composable
-private fun AdvisoryBadge(label: String, adult: Boolean = false) {
-    val background = if (adult) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.surfaceVariant
-    val foreground = if (adult) MaterialTheme.colorScheme.onError else MaterialTheme.colorScheme.onSurfaceVariant
-    Box(
-        Modifier
-            .padding(bottom = 4.dp)
-            .clip(RoundedCornerShape(5.dp))
-            .background(background)
-            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(5.dp))
-            .padding(horizontal = 7.dp, vertical = 4.dp),
-    ) {
-        Text(label, style = MaterialTheme.typography.labelSmall, color = foreground)
-    }
-}
-
-@Composable
-private fun Header(info: Media) {
-    val device = LocalAppDeviceProfile.current
-    val bannerHeight = when {
-        device.isTv -> 260.dp
-        device.isExpanded -> 230.dp
-        device.isTablet -> 200.dp
-        else -> 170.dp
-    }
-    val coverWidth = when {
-        device.isTv -> 156.dp
-        device.isExpanded -> 140.dp
-        device.isTablet -> 124.dp
-        else -> 110.dp
-    }
-    Column {
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = if (device.isTv) device.pagePadding else 0.dp)
-                .height(bannerHeight)
-                .clip(if (device.isTv) RoundedCornerShape(18.dp) else RoundedCornerShape(0.dp)),
-        ) {
-            AsyncImage(
-                model = info.bannerImage ?: info.coverImage.best,
-                contentDescription = null,
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop,
-            )
-            Box(
-                Modifier.fillMaxSize().background(
-                    Brush.verticalGradient(
-                        0f to Color.Transparent,
-                        1f to MaterialTheme.colorScheme.background,
-                    ),
-                ),
-            )
-        }
-        Row(Modifier.padding(device.pagePadding)) {
-            AsyncImage(
-                model = info.coverImage.best,
-                contentDescription = info.title.preferred,
-                modifier = Modifier
-                    .width(coverWidth)
-                    .aspectRatio(2f / 3f)
-                    .clip(RoundedCornerShape(10.dp))
-                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp)),
-                contentScale = ContentScale.Crop,
-            )
-            Column(Modifier.padding(start = 12.dp)) {
-                Text(info.title.preferred, style = MaterialTheme.typography.titleLarge, maxLines = 3, overflow = TextOverflow.Ellipsis)
-                Text(
-                    listOfNotNull(info.format, info.seasonYear?.toString()).joinToString(" • "),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 4.dp),
-                )
-                info.episodes?.let {
-                    Text("$it episodes", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                info.averageScore?.let {
-                    Text("★ $it%", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
-                }
-                info.status?.let {
-                    Text(it.replace('_', ' '), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
-                }
             }
         }
     }
@@ -387,108 +277,182 @@ private fun Header(info: Media) {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun GenreRow(genres: List<String>) {
-    if (genres.isEmpty()) return
-    val device = LocalAppDeviceProfile.current
-    FlowRow(
-        modifier = Modifier.padding(horizontal = device.pagePadding),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        genres.forEach { genre ->
-            Box(
-                Modifier
-                    .padding(bottom = 6.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
-                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(6.dp))
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-            ) {
-                Text(genre, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-    }
-}
-
-@Composable
-private fun Description(description: String?) {
-    if (description.isNullOrBlank()) return
-    val device = LocalAppDeviceProfile.current
-    var expanded by remember { mutableStateOf(false) }
-    val clean = remember(description) { description.replace(Regex("<[^>]*>"), "").trim() }
-    Text(
-        text = clean,
-        style = MaterialTheme.typography.bodyMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        maxLines = if (expanded) Int.MAX_VALUE else 4,
-        overflow = TextOverflow.Ellipsis,
-        modifier = Modifier
-            .padding(horizontal = device.pagePadding, vertical = 8.dp)
-            .fillMaxWidth()
-            .focusHighlight(RoundedCornerShape(8.dp))
-            .clip(RoundedCornerShape(8.dp))
-            .background(MaterialTheme.colorScheme.surface)
-            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
-            .clickable { expanded = !expanded }
-            .padding(12.dp),
-    )
-}
-
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
-@Composable
-private fun SelectorSection(
-    providers: List<String>,
-    pendingProviders: Set<String>,
+private fun EpisodesSidebar(
+    data: DetailData,
     selectedProvider: String?,
-    categories: List<Category>,
     selectedCategory: Category,
     onSelectProvider: (String) -> Unit,
     onSelectCategory: (Category) -> Unit,
+    onPlay: (String, String, String) -> Unit
 ) {
-    val device = LocalAppDeviceProfile.current
-    Column(
-        Modifier
-            .padding(horizontal = device.pagePadding, vertical = 8.dp)
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.surface)
-            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))
-            .padding(12.dp),
-    ) {
-        Text("Server", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp, bottom = 4.dp))
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            providers.forEach { name ->
-                val pending = name in pendingProviders
-                FilterChip(
-                    selected = name == selectedProvider,
-                    enabled = !pending,
-                    onClick = { onSelectProvider(name) },
-                    modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp)),
-                    label = {
-                        val suffix = if (ProviderCatalog.isEmbed(name)) " ⧉" else ""
-                        Text(ProviderCatalog.label(name) + suffix)
-                    },
-                    leadingIcon = if (pending) {
-                        {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(14.dp),
-                                strokeWidth = 1.5.dp,
+    val provider = selectedProvider?.let { data.episodes.provider(it) }
+    val episodes = provider?.episodes(selectedCategory).orEmpty()
+    val visibleProviders = remember(data.episodes.providerNames, data.loadingMore) {
+        val pending = if (data.loadingMore) ProviderCatalog.anivexaProviders else emptyList()
+        (data.episodes.providerNames + pending).distinct().sortedBy(ProviderCatalog::sortKey)
+    }
+
+    var selectedRangeIndex by remember { mutableStateOf(0) }
+    val chunkSize = 50
+    val episodeChunks = remember(episodes) { episodes.chunked(chunkSize) }
+    // If the selected index is now out of bounds due to provider change, clamp it.
+    if (selectedRangeIndex >= episodeChunks.size && episodeChunks.isNotEmpty()) {
+        selectedRangeIndex = episodeChunks.size - 1
+    }
+    val currentEpisodes = episodeChunks.getOrNull(selectedRangeIndex).orEmpty()
+    val categories = provider?.categories.orEmpty()
+
+    Column(Modifier.fillMaxSize()) {
+        // TOP ROW: Servers and Sub/Dub Toggle
+        Row(
+            Modifier.fillMaxWidth().padding(top = 48.dp, start = 32.dp, end = 32.dp, bottom = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            LazyRow(
+                modifier = Modifier.weight(1f),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(visibleProviders) { name ->
+                    val isSelected = name == selectedProvider
+                    Box(
+                        Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (isSelected) Color.White else Color.White.copy(alpha = 0.1f))
+                            .clickable { onSelectProvider(name) }
+                            .focusHighlight(RoundedCornerShape(8.dp))
+                            .padding(horizontal = 16.dp, vertical = 10.dp)
+                    ) {
+                        Text(
+                            ProviderCatalog.label(name),
+                            color = if (isSelected) Color.Black else Color.White,
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                    }
+                }
+            }
+
+            if (categories.isNotEmpty()) {
+                // Sub / Dub Toggle
+                Row(
+                    Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color.White.copy(alpha = 0.1f))
+                        .padding(4.dp)
+                ) {
+                    categories.forEach { cat ->
+                        val isSelected = cat == selectedCategory
+                        Box(
+                            Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(if (isSelected) Color.White else Color.Transparent)
+                                .clickable { onSelectCategory(cat) }
+                                .focusHighlight(RoundedCornerShape(6.dp))
+                                .padding(horizontal = 16.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                cat.api.uppercase(),
+                                color = if (isSelected) Color.Black else Color.White,
+                                fontWeight = FontWeight.Bold,
+                                style = MaterialTheme.typography.labelMedium
                             )
                         }
-                    } else null,
-                )
+                    }
+                }
             }
         }
-        if (categories.size > 1 || categories.firstOrNull() == Category.DUB) {
-            Text("Audio", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp, bottom = 4.dp))
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                categories.forEach { cat ->
-                    FilterChip(
-                        selected = cat == selectedCategory,
-                        onClick = { onSelectCategory(cat) },
-                        modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp)),
-                        label = { Text(cat.api.uppercase()) },
-                        colors = FilterChipDefaults.filterChipColors(),
-                    )
+
+        // MIDDLE ROW: Episode ranges
+        if (episodeChunks.size > 1) {
+            LazyRow(
+                Modifier.fillMaxWidth().padding(start = 32.dp, end = 32.dp, bottom = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(episodeChunks.size) { index ->
+                    val chunk = episodeChunks[index]
+                    val isSelected = index == selectedRangeIndex
+                    val label = if (chunk.size == 1) chunk.first().displayNumber else "${chunk.first().displayNumber}-${chunk.last().displayNumber}"
+                    Box(
+                        Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (isSelected) Color.White.copy(alpha = 0.2f) else Color.Transparent)
+                            .clickable { selectedRangeIndex = index }
+                            .focusHighlight(RoundedCornerShape(8.dp))
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                    ) {
+                        Text(
+                            label,
+                            color = Color.White,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                        )
+                    }
+                }
+            }
+        } else if (episodeChunks.isEmpty()) {
+            Box(Modifier.fillMaxWidth().padding(start = 32.dp, end = 32.dp, bottom = 16.dp)) {
+                if (data.loadingMore) {
+                    CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp))
+                } else {
+                    Text(data.episodesError ?: "No episodes found.", color = Color.White.copy(alpha = 0.7f))
+                }
+            }
+        }
+
+        // BOTTOM AREA: Episodes Grid/List
+        LazyColumn(
+            Modifier.fillMaxSize(),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(start = 32.dp, end = 32.dp, bottom = 48.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            items(currentEpisodes) { ep ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .focusHighlight(RoundedCornerShape(8.dp))
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color.White.copy(alpha = 0.05f))
+                        .clickable { selectedProvider?.let { onPlay(it, selectedCategory.api, ep.displayNumber) } }
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val imageUrl = ep.image ?: data.info.coverImage?.best
+                    if (imageUrl != null) {
+                        AsyncImage(
+                            model = ImageRequest.Builder(LocalContext.current)
+                                .data(imageUrl)
+                                .crossfade(true)
+                                .build(),
+                            contentDescription = "Episode Thumbnail",
+                            modifier = Modifier
+                                .width(120.dp)
+                                .aspectRatio(16f / 9f)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Color.Black.copy(alpha = 0.5f)),
+                            contentScale = ContentScale.Crop
+                        )
+                        Spacer(Modifier.width(16.dp))
+                    }
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "${ep.displayNumber}. ${ep.title ?: "Episode ${ep.displayNumber}"}",
+                            color = Color.White,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    if (ep.filler) {
+                        Box(
+                            Modifier.padding(start = 16.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(MaterialTheme.colorScheme.error)
+                            .padding(horizontal = 6.dp, vertical = 4.dp)
+                        ) {
+                            Text("FILLER", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onError, fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
             }
         }
@@ -496,27 +460,46 @@ private fun SelectorSection(
 }
 
 @Composable
-private fun EpisodeChip(episode: EpisodeItem, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    val bg = if (episode.filler) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface
+private fun PillBadge(text: String) {
     Box(
-        modifier = modifier
-            .focusHighlight(RoundedCornerShape(8.dp))
-            .height(44.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(bg)
-            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
+        Modifier
+            .clip(CircleShape)
+            .border(1.dp, Color.White.copy(alpha = 0.2f), CircleShape)
+            .background(Color.Black.copy(alpha = 0.4f))
+            .padding(horizontal = 16.dp, vertical = 6.dp)
     ) {
-        Text(episode.displayNumber, style = MaterialTheme.typography.labelLarge)
-        if (episode.filler) {
-            Text(
-                "F",
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.tertiary,
-                modifier = Modifier.align(Alignment.TopEnd).padding(top = 2.dp, end = 5.dp),
-            )
-        }
+        Text(text, color = Color.White, style = MaterialTheme.typography.bodyMedium)
     }
 }
+
+@Composable
+private fun ActionPill(icon: androidx.compose.ui.graphics.vector.ImageVector, text: String, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .focusHighlight(CircleShape)
+            .clip(CircleShape)
+            .background(Color.White.copy(alpha = 0.15f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+        Text(text, color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 8.dp))
+    }
+}
+
+@Composable
+private fun CircleActionButton(icon: androidx.compose.ui.graphics.vector.ImageVector, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .size(48.dp)
+            .focusHighlight(CircleShape)
+            .clip(CircleShape)
+            .background(Color.White.copy(alpha = 0.15f))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(24.dp))
+    }
+}
+

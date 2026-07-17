@@ -10,7 +10,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 // The site is dark-first; we commit to a single dark scheme so the app matches it 1:1.
 private val MiruroDarkColors = darkColorScheme(
     primary = MiruroAccent,
-    onPrimary = MiruroOnSurface,
+    onPrimary = androidx.compose.ui.graphics.Color.Black,
     secondary = MiruroAccentVariant,
     background = MiruroBackground,
     onBackground = MiruroOnSurface,

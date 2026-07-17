@@ -7,12 +7,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.miruronative.data.AppGraph
 import com.miruronative.diagnostics.DiagnosticsLog
-import com.miruronative.data.model.DiscoverFilters
 import com.miruronative.data.model.Media
 import com.miruronative.ui.UiState
 import com.miruronative.ui.rethrowIfCancellation
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -59,16 +56,14 @@ class HomeViewModel : ViewModel() {
             DiagnosticsLog.event("Home load start force=$force")
             if (force && _state.value is UiState.Success) _isRefreshing.value = true else _state.value = UiState.Loading
             try {
-                val data = coroutineScope {
-                    val spotlight = async { repo.trending(force = force).items }
-                    val newest = async { repo.recentlyReleased(force = force).items }
-                    val popular = async { repo.popular(force = force).items }
-                    val movies = async {
-                        repo.discover(DiscoverFilters(format = "MOVIE", sort = "POPULARITY_DESC"), force = force).items
-                    }
-                    val topRated = async { repo.topRated(force = force).items }
-                    HomeData(spotlight.await(), newest.await(), popular.await(), movies.await(), topRated.await())
-                }
+                val collections = repo.homeCollections(force)
+                val data = HomeData(
+                    spotlight = collections.spotlight,
+                    newest = collections.newest,
+                    popular = collections.popular,
+                    movies = collections.movies,
+                    topRated = collections.topRated,
+                )
                 DiagnosticsLog.event(
                     "Home load success spotlight=${data.spotlight.size} newest=${data.newest.size} " +
                         "popular=${data.popular.size} movies=${data.movies.size} topRated=${data.topRated.size}",

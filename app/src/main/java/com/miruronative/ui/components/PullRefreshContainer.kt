@@ -6,6 +6,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.RectangleShape
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
 
 /** Touch pull-to-refresh with an automatic Material indicator; TV keeps normal D-pad scrolling. */
@@ -28,3 +29,4 @@ fun PullRefreshContainer(
         )
     }
 }
+

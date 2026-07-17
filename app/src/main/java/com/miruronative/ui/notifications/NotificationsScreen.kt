@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
@@ -37,6 +36,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -133,7 +133,7 @@ fun NotificationsScreen(
                 navigationIcon = {
                     IconButton(
                         onClick = onBack,
-                        modifier = Modifier.focusHighlight(RoundedCornerShape(24.dp)),
+                        modifier = Modifier.focusHighlight(RectangleShape),
                     ) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
@@ -141,14 +141,14 @@ fun NotificationsScreen(
                 actions = {
                     IconButton(
                         onClick = vm::refresh,
-                        modifier = Modifier.focusHighlight(RoundedCornerShape(24.dp)),
+                        modifier = Modifier.focusHighlight(RectangleShape),
                     ) {
                         Icon(Icons.Default.Refresh, contentDescription = "Refresh")
                     }
                     TextButton(
                         onClick = vm::markAllRead,
                         enabled = unreadCount > 0,
-                        modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp)),
+                        modifier = Modifier.focusHighlight(RectangleShape),
                     ) {
                         Text("Mark all read")
                     }
@@ -223,7 +223,7 @@ private fun NotificationList(
                         selected = tab == entry,
                         onClick = { onTab(entry) },
                         label = { Text(if (unreadTotal > 0) "${entry.label}  $count" else entry.label) },
-                        modifier = Modifier.focusHighlight(RoundedCornerShape(8.dp)),
+                        modifier = Modifier.focusHighlight(RectangleShape),
                     )
                 }
             }
@@ -260,7 +260,7 @@ private fun NotificationList(
 
 @Composable
 private fun NotificationCard(item: AppNotification, onClick: () -> Unit) {
-    val shape = RoundedCornerShape(14.dp)
+    val shape = RectangleShape
     Box(
         Modifier
             .fillMaxWidth()
@@ -293,7 +293,7 @@ private fun NotificationCard(item: AppNotification, onClick: () -> Unit) {
                 contentScale = ContentScale.Crop,
                 modifier = Modifier
                     .size(width = 58.dp, height = 76.dp)
-                    .clip(RoundedCornerShape(8.dp)),
+                    .clip(RectangleShape),
             )
             Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
                 Text(
@@ -320,7 +320,7 @@ private fun NotificationCard(item: AppNotification, onClick: () -> Unit) {
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier
                             .padding(top = 8.dp)
-                            .background(MaterialTheme.colorScheme.background.copy(alpha = 0.85f), RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.background.copy(alpha = 0.85f), RectangleShape)
                             .padding(horizontal = 10.dp, vertical = 4.dp),
                     )
                 }
@@ -331,7 +331,7 @@ private fun NotificationCard(item: AppNotification, onClick: () -> Unit) {
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier
                     .align(Alignment.Bottom)
-                    .background(MaterialTheme.colorScheme.background.copy(alpha = 0.85f), RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.background.copy(alpha = 0.85f), RectangleShape)
                     .padding(horizontal = 10.dp, vertical = 4.dp),
             )
         }
@@ -342,3 +342,4 @@ private val dayFormatter = DateTimeFormatter.ofPattern("d MMM")
 
 private fun formatDay(epochSeconds: Long): String =
     Instant.ofEpochSecond(epochSeconds).atZone(ZoneId.systemDefault()).format(dayFormatter)
+

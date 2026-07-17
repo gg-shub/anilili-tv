@@ -10,9 +10,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Icon
@@ -21,9 +21,11 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -40,6 +42,11 @@ fun AnimeCard(
     modifier: Modifier = Modifier,
 ) {
     val device = LocalAppDeviceProfile.current
+    val titleStyle = MaterialTheme.typography.labelLarge
+    val titleMaxLines = if (device.isTv) 3 else 1
+    val tvTitleHeight = with(LocalDensity.current) {
+        titleStyle.lineHeight.toDp() * titleMaxLines
+    }
     Column(
         modifier = modifier
             .focusHighlight()
@@ -49,7 +56,7 @@ fun AnimeCard(
             Modifier
                 .fillMaxWidth()
                 .aspectRatio(2f / 3f)
-                .clip(RoundedCornerShape(8.dp))
+                .clip(RectangleShape)
                 .background(MaterialTheme.colorScheme.surfaceVariant),
         ) {
             AsyncImage(
@@ -67,10 +74,12 @@ fun AnimeCard(
         }
         Text(
             text = media.title.preferred,
-            style = MaterialTheme.typography.labelLarge,
-            maxLines = if (device.isTv) 3 else 1,
+            style = titleStyle,
+            maxLines = titleMaxLines,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(top = 5.dp),
+            modifier = Modifier
+                .padding(top = 5.dp)
+                .then(if (device.isTv) Modifier.height(tvTitleHeight) else Modifier),
         )
         Text(
             text = listOfNotNull(
@@ -91,7 +100,7 @@ private fun AdultBadge(modifier: Modifier = Modifier) {
     Text(
         "18+",
         modifier = modifier
-            .clip(RoundedCornerShape(5.dp))
+            .clip(RectangleShape)
             .background(MaterialTheme.colorScheme.error)
             .padding(horizontal = 6.dp, vertical = 3.dp),
         style = MaterialTheme.typography.labelSmall,
@@ -105,9 +114,9 @@ private fun AdultBadge(modifier: Modifier = Modifier) {
 fun RatingBadge(score: Int, modifier: Modifier = Modifier) {
     Row(
         modifier
-            .clip(RoundedCornerShape(6.dp))
+            .clip(RectangleShape)
             .background(Color.Black.copy(alpha = .78f))
-            .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = .6f), RoundedCornerShape(6.dp))
+            .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = .6f), RectangleShape)
             .padding(horizontal = 5.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -127,3 +136,4 @@ fun RatingBadge(score: Int, modifier: Modifier = Modifier) {
 }
 
 val GridContentPadding = PaddingValues(16.dp)
+

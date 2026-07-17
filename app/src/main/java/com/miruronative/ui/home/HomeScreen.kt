@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -21,13 +22,15 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
+
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.DateRange
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -38,9 +41,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import coil.request.ImageRequest
+import coil.size.Size
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -51,6 +57,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -92,6 +99,9 @@ fun HomeScreen(
     onResume: (HistoryEntry) -> Unit,
     onSearchClick: () -> Unit,
     onNotificationsClick: () -> Unit,
+    onScheduleClick: () -> Unit,
+    onLibraryClick: () -> Unit,
+    onSettingsClick: () -> Unit,
     modifier: Modifier = Modifier,
     vm: HomeViewModel = viewModel(),
 ) {
@@ -116,32 +126,37 @@ fun HomeScreen(
     Scaffold(
         modifier = modifier,
         topBar = {
-            TopAppBar(
-                title = {
-                    if (!device.useNavigationRail) {
-                        Text(
-                            stringResource(R.string.app_name),
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Black,
-                            letterSpacing = 1.sp,
-                        )
-                    }
-                },
-                actions = {
-                    IconButton(
-                        onClick = onNotificationsClick,
-                        modifier = Modifier.focusHighlight(CircleShape),
-                    ) {
-                        Icon(Icons.Default.Notifications, contentDescription = "Notifications")
-                    }
+            CenterAlignedTopAppBar(
+                navigationIcon = {
                     IconButton(
                         onClick = onSearchClick,
-                        modifier = Modifier.focusHighlight(CircleShape),
+                        modifier = Modifier.focusHighlight(androidx.compose.foundation.shape.CircleShape, showBorder = true),
                     ) {
                         Icon(Icons.Default.Search, contentDescription = "Search anime")
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+                title = {
+                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        TextButton(onClick = { /* already here */ }, modifier = Modifier.focusHighlight(androidx.compose.foundation.shape.CircleShape, showBorder = true)) {
+                            Text("HOME", color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold)
+                        }
+                        TextButton(onClick = onLibraryClick, modifier = Modifier.focusHighlight(androidx.compose.foundation.shape.CircleShape, showBorder = true)) {
+                            Text("LIBRARY", color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold)
+                        }
+                        TextButton(onClick = onScheduleClick, modifier = Modifier.focusHighlight(androidx.compose.foundation.shape.CircleShape, showBorder = true)) {
+                            Text("SCHEDULE", color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                },
+                actions = {
+                    IconButton(
+                        onClick = onSettingsClick,
+                        modifier = Modifier.focusHighlight(androidx.compose.foundation.shape.CircleShape, showBorder = true),
+                    ) {
+                        Icon(Icons.Default.Settings, contentDescription = "Settings")
+                    }
+                },
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = MaterialTheme.colorScheme.background),
             )
         },
     ) { padding ->
@@ -202,10 +217,10 @@ private fun StartupStillLoading(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                TextButton(onClick = onRetry, modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp))) {
+                TextButton(onClick = onRetry, modifier = Modifier.focusHighlight(RectangleShape)) {
                     Text("Retry")
                 }
-                Button(onClick = onShareDiagnostics, modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp))) {
+                Button(onClick = onShareDiagnostics, modifier = Modifier.focusHighlight(RectangleShape)) {
                     Text("Share diagnostics")
                 }
             }
@@ -233,6 +248,7 @@ private fun HomeContent(
 ) {
     val device = LocalAppDeviceProfile.current
     val continueFocusRequester = remember { FocusRequester() }
+    val tabFocusRequester = remember { FocusRequester() }
     LaunchedEffect(data, history.size) {
         DiagnosticsLog.event(
             "HomeContent rendered spotlight=${data.spotlight.size} " +
@@ -240,7 +256,7 @@ private fun HomeContent(
         )
     }
     val columns = when {
-        device.isTv -> 7
+        device.isTv -> 5
         device.isExpanded -> 6
         device.isTablet -> 4
         else -> 3
@@ -256,17 +272,19 @@ private fun HomeContent(
                 items = data.spotlight.take(6),
                 onAnimeClick = onAnimeClick,
                 onWatchNow = onWatchNow,
-                onMoveDown = if (history.isNotEmpty()) {
-                    { runCatching { continueFocusRequester.requestFocus() } }
-                } else {
-                    null
-                },
+                onMoveDown = {
+                    if (history.isNotEmpty()) {
+                        runCatching { continueFocusRequester.requestFocus() }
+                    } else {
+                        runCatching { tabFocusRequester.requestFocus() }
+                    }
+                }
             )
         }
         if (history.isNotEmpty()) {
             item { ContinueRail(history.take(12), onResume, continueFocusRequester) }
         }
-        item { HomeCatalogTabs(selectedTab, onSelectTab) }
+        item { HomeCatalogTabs(selectedTab, onSelectTab, tabFocusRequester) }
         items(catalog.chunked(columns)) { row ->
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = device.pagePadding),
@@ -283,24 +301,25 @@ private fun HomeContent(
 }
 
 @Composable
-private fun HomeCatalogTabs(selected: HomeTab, onSelect: (HomeTab) -> Unit) {
+private fun HomeCatalogTabs(selected: HomeTab, onSelect: (HomeTab) -> Unit, firstTabFocusRequester: FocusRequester) {
     val device = LocalAppDeviceProfile.current
     Row(
         Modifier
             .fillMaxWidth()
             .padding(horizontal = device.pagePadding)
-            .clip(RoundedCornerShape(9.dp))
+            .clip(RectangleShape)
             .background(MaterialTheme.colorScheme.surface)
             .padding(4.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        HomeTab.entries.forEach { tab ->
+        HomeTab.entries.forEachIndexed { index, tab ->
             val active = tab == selected
             Box(
                 Modifier
                     .weight(1f)
-                    .focusHighlight(RoundedCornerShape(7.dp))
-                    .clip(RoundedCornerShape(7.dp))
+                    .then(if (index == 0) Modifier.focusRequester(firstTabFocusRequester) else Modifier)
+                    .focusHighlight(RectangleShape)
+                    .clip(RectangleShape)
                     .background(if (active) MaterialTheme.colorScheme.primary.copy(alpha = .24f) else Color.Transparent)
                     .clickable { onSelect(tab) }
                     .padding(vertical = 9.dp),
@@ -329,17 +348,18 @@ private fun HeroPager(
     val pagerState = rememberPagerState(pageCount = { items.size })
     val scope = rememberCoroutineScope()
     val heroHeight = when {
-        device.isTv -> 420.dp
+        device.isTv -> 300.dp
         device.isExpanded -> 360.dp
         device.isTablet -> 320.dp
         else -> 270.dp
     }
+    val cardFocusRequesters = remember(items.size) { List(items.size) { FocusRequester() } }
     Box(
         Modifier
             .fillMaxWidth()
             .padding(horizontal = if (device.isTv) device.pagePadding else 0.dp)
             .height(heroHeight)
-            .clip(if (device.isTv) RoundedCornerShape(18.dp) else RoundedCornerShape(0.dp)),
+            .clip(if (device.isTv) RectangleShape else RectangleShape),
     ) {
         HorizontalPager(
             state = pagerState,
@@ -348,15 +368,21 @@ private fun HeroPager(
         ) { page ->
             HeroCard(
                 media = items[page],
+                focusRequester = cardFocusRequesters[page],
                 onAnimeClick = onAnimeClick,
-                onWatchNow = onWatchNow,
                 canGoPrevious = page > 0,
                 canGoNext = page < items.lastIndex,
                 onPrevious = {
-                    scope.launch { pagerState.animateScrollToPage(page - 1) }
+                    scope.launch {
+                        pagerState.animateScrollToPage(page - 1)
+                        runCatching { cardFocusRequesters[page - 1].requestFocus() }
+                    }
                 },
                 onNext = {
-                    scope.launch { pagerState.animateScrollToPage(page + 1) }
+                    scope.launch {
+                        pagerState.animateScrollToPage(page + 1)
+                        runCatching { cardFocusRequesters[page + 1].requestFocus() }
+                    }
                 },
                 onMoveDown = onMoveDown,
             )
@@ -370,7 +396,7 @@ private fun HeroPager(
                     Modifier
                         .height(5.dp)
                         .width(if (i == pagerState.currentPage) 18.dp else 5.dp)
-                        .clip(CircleShape)
+                        .clip(RectangleShape)
                         .background(if (i == pagerState.currentPage) MaterialTheme.colorScheme.primary else Color.White.copy(.4f)),
                 )
             }
@@ -381,8 +407,8 @@ private fun HeroPager(
 @Composable
 private fun HeroCard(
     media: Media,
+    focusRequester: FocusRequester,
     onAnimeClick: (Int) -> Unit,
-    onWatchNow: (Int) -> Unit,
     canGoPrevious: Boolean,
     canGoNext: Boolean,
     onPrevious: () -> Unit,
@@ -390,99 +416,88 @@ private fun HeroCard(
     onMoveDown: (() -> Unit)?,
 ) {
     val device = LocalAppDeviceProfile.current
-    Box(Modifier.fillMaxSize()) {
-        AsyncImage(
-            model = media.bannerImage ?: media.coverImage.best,
-            contentDescription = null,
-            modifier = Modifier.fillMaxSize(),
-            contentScale = ContentScale.Crop,
-        )
-        Box(
-            Modifier.fillMaxSize().background(
-                Brush.verticalGradient(0.05f to Color.Black.copy(.08f), .62f to Color.Black.copy(.35f), 1f to MaterialTheme.colorScheme.background),
-            ),
-        )
-        Column(
-            Modifier
-                .align(Alignment.BottomStart)
-                .fillMaxWidth(if (device.isExpanded) 0.65f else 1f)
-                .padding(horizontal = device.pagePadding, vertical = 24.dp),
-        ) {
-            media.nextAiringEpisode?.episode?.let { Badge("NEW EPISODE $it SOON") }
-            Text(
-                media.title.preferred,
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Black,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 8.dp),
-            )
-            Text(
-                listOfNotNull(media.seasonYear?.toString(), media.format, media.averageScore?.let { "$it% Match" }).joinToString("  •  "),
-                style = MaterialTheme.typography.labelMedium,
-                color = Color.White.copy(.82f),
-                modifier = Modifier.padding(top = 5.dp),
-            )
-            Row(Modifier.padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(
-                    onClick = { onWatchNow(media.id) },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black),
-                    modifier = Modifier
-                        .onPreviewKeyEvent { event ->
-                            if (device.isTv && event.type == KeyEventType.KeyDown) {
-                                when (event.key) {
-                                    Key.DirectionLeft -> {
-                                        if (canGoPrevious) {
-                                            onPrevious()
-                                            true
-                                        } else {
-                                            false
-                                        }
-                                    }
-                                    Key.DirectionDown -> {
-                                        onMoveDown?.invoke()
-                                        onMoveDown != null
-                                    }
-                                    else -> false
-                                }
+    Box(
+        Modifier.fillMaxSize()
+            .focusRequester(focusRequester)
+            .focusHighlight(RectangleShape)
+            .background(Color(0xFF0F172A))
+            .clickable { onAnimeClick(media.id) }
+            .onPreviewKeyEvent { event ->
+                if (device.isTv && event.type == KeyEventType.KeyDown) {
+                    when (event.key) {
+                        Key.DirectionLeft -> {
+                            if (canGoPrevious) {
+                                onPrevious()
+                                true
                             } else {
                                 false
                             }
                         }
-                        .focusHighlight(RoundedCornerShape(24.dp)),
-                ) {
-                    Icon(Icons.Default.PlayArrow, contentDescription = null)
-                    Text("Play", Modifier.padding(start = 4.dp), fontWeight = FontWeight.Bold)
-                }
-                OutlinedButton(
-                    onClick = { onAnimeClick(media.id) },
-                    modifier = Modifier
-                        .onPreviewKeyEvent { event ->
-                            if (device.isTv && event.type == KeyEventType.KeyDown) {
-                                when (event.key) {
-                                    Key.DirectionRight -> {
-                                        if (canGoNext) {
-                                            onNext()
-                                            true
-                                        } else {
-                                            false
-                                        }
-                                    }
-                                    Key.DirectionDown -> {
-                                        onMoveDown?.invoke()
-                                        onMoveDown != null
-                                    }
-                                    else -> false
-                                }
+                        Key.DirectionRight -> {
+                            if (canGoNext) {
+                                onNext()
+                                true
                             } else {
                                 false
                             }
                         }
-                        .focusHighlight(RoundedCornerShape(24.dp)),
-                ) {
-                    Icon(Icons.Default.Info, contentDescription = null)
-                    Text("Details", Modifier.padding(start = 4.dp))
+                        Key.DirectionDown -> {
+                            onMoveDown?.invoke()
+                            onMoveDown != null
+                        }
+                        else -> false
+                    }
+                } else {
+                    false
                 }
+            }
+    ) {
+        Row(Modifier.fillMaxSize()) {
+            Column(
+                Modifier
+                    .weight(1f)
+                    .padding(horizontal = device.pagePadding, vertical = 24.dp)
+                    .align(Alignment.CenterVertically),
+            ) {
+                media.nextAiringEpisode?.episode?.let { Badge("NEW EPISODE $it SOON") }
+                Text(
+                    media.title.preferred,
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Black,
+                    color = Color.White,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                Text(
+                    listOfNotNull(media.seasonYear?.toString(), media.format, media.averageScore?.let { "$it% Match" }).joinToString("  •  "),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = Color.White.copy(.82f),
+                    modifier = Modifier.padding(top = 5.dp, bottom = 16.dp),
+                )
+                Row(
+                    modifier = Modifier
+                        .clip(androidx.compose.foundation.shape.CircleShape)
+                        .background(MaterialTheme.colorScheme.primary)
+                        .padding(horizontal = 20.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimary)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Watch Now", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onPrimary)
+                }
+            }
+            Box(Modifier.weight(1f).fillMaxHeight()) {
+                AsyncImage(
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(media.coverImage.best)
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize().padding(16.dp),
+                    contentScale = ContentScale.Fit,
+                    filterQuality = androidx.compose.ui.graphics.FilterQuality.High,
+                )
             }
         }
     }
@@ -547,7 +562,7 @@ private fun ContinueRail(
                         .focusHighlight()
                         .clickable { onResume(entry) },
                 ) {
-                    Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant)) {
+                    Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RectangleShape).background(MaterialTheme.colorScheme.surfaceVariant)) {
                         AsyncImage(model = entry.cover, contentDescription = "Resume ${entry.title}", modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                         Box(Modifier.fillMaxSize().background(Color.Black.copy(.3f)))
                         Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.align(Alignment.Center))
@@ -565,7 +580,8 @@ private fun ContinueRail(
 
 @Composable
 private fun Badge(text: String) {
-    Box(Modifier.clip(RoundedCornerShape(5.dp)).background(MaterialTheme.colorScheme.primary).padding(horizontal = 8.dp, vertical = 3.dp)) {
+    Box(Modifier.clip(RectangleShape).background(MaterialTheme.colorScheme.primary).padding(horizontal = 8.dp, vertical = 3.dp)) {
         Text(text, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.Bold)
     }
 }
+

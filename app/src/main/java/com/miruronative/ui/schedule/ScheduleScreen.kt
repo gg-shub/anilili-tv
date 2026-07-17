@@ -22,7 +22,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Icon
@@ -39,6 +38,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
@@ -154,8 +154,8 @@ private fun DayTabs(selected: Int, onSelect: (Int) -> Unit) {
             val active = offset == selected
             Box(
                 Modifier
-                    .focusHighlight(RoundedCornerShape(20.dp))
-                    .clip(RoundedCornerShape(20.dp))
+                    .focusHighlight(RectangleShape)
+                    .clip(RectangleShape)
                     .background(if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface)
                     .clickable { onSelect(offset) }
                     .padding(horizontal = 16.dp, vertical = 8.dp),
@@ -221,15 +221,15 @@ private fun ScheduleRow(
         Modifier
             .fillMaxWidth()
             .padding(horizontal = device.pagePadding, vertical = 7.dp)
-            .focusHighlight(RoundedCornerShape(12.dp))
-            .clip(RoundedCornerShape(10.dp))
+            .focusHighlight(RectangleShape)
+            .clip(RectangleShape)
             .background(MaterialTheme.colorScheme.surface)
-            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outline, RectangleShape)
             .clickable { onAnimeClick(media.id) }
             .padding(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.size(width = 54.dp, height = 74.dp).clip(RoundedCornerShape(8.dp))) {
+        Box(Modifier.size(width = 54.dp, height = 74.dp).clip(RectangleShape)) {
             AsyncImage(
                 model = media.coverImage.best,
                 contentDescription = media.title.preferred,
@@ -252,7 +252,7 @@ private fun ScheduleRow(
             Box(
                 Modifier
                     .padding(top = 4.dp)
-                    .clip(RoundedCornerShape(6.dp))
+                    .clip(RectangleShape)
                     .background(MaterialTheme.colorScheme.primary)
                     .padding(horizontal = 8.dp, vertical = 2.dp),
             ) {
@@ -272,7 +272,7 @@ private fun ScheduleRow(
         if (item.airingAt * 1000L > System.currentTimeMillis()) {
             IconButton(
                 onClick = { onToggleReminder(item) },
-                modifier = Modifier.focusHighlight(RoundedCornerShape(24.dp)),
+                modifier = Modifier.focusHighlight(RectangleShape),
             ) {
                 Icon(
                     if (reminded) Icons.Filled.Notifications else Icons.Outlined.NotificationsNone,
@@ -283,3 +283,4 @@ private fun ScheduleRow(
         }
     }
 }
+

@@ -23,7 +23,6 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -52,6 +51,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -153,7 +153,7 @@ fun SearchScreen(
                                 }
                             }
                         },
-                        shape = RoundedCornerShape(10.dp),
+                        shape = RectangleShape,
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                         keyboardActions = KeyboardActions(onSearch = {
@@ -168,8 +168,8 @@ fun SearchScreen(
                     Button(
                         onClick = { showFilters = true },
                         contentPadding = PaddingValues(horizontal = 13.dp),
-                        modifier = Modifier.height(56.dp).focusHighlight(RoundedCornerShape(10.dp)),
-                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.height(56.dp).focusHighlight(RectangleShape),
+                        shape = RectangleShape,
                     ) {
                         Icon(Icons.Default.FilterList, contentDescription = "Open filters")
                         if (vm.filters.activeCount > 0) {
@@ -234,7 +234,7 @@ fun SearchScreen(
 @Composable
 private fun ResultsGrid(results: List<Media>, filters: DiscoverFilters, onAnimeClick: (Int) -> Unit) {
     val device = LocalAppDeviceProfile.current
-    val tileMinWidth = if (device.isTv) 118.dp else device.gridMinWidth
+    val tileMinWidth = device.gridMinWidth
     if (results.isEmpty()) {
         Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -249,8 +249,14 @@ private fun ResultsGrid(results: List<Media>, filters: DiscoverFilters, onAnimeC
         }
         return
     }
+    val columns = when {
+        device.isTv -> 6 // Increased from 7 to 9, then decreased to 6 for better visibility
+        device.isExpanded -> 8
+        device.isTablet -> 6
+        else -> 4
+    }
     LazyVerticalGrid(
-        columns = GridCells.Adaptive(tileMinWidth),
+        columns = GridCells.Fixed(columns),
         contentPadding = PaddingValues(horizontal = device.pagePadding, vertical = 14.dp),
         horizontalArrangement = Arrangement.spacedBy(if (device.isTv) 14.dp else 9.dp),
         verticalArrangement = Arrangement.spacedBy(if (device.isTv) 16.dp else 14.dp),
@@ -329,7 +335,7 @@ private fun FilterSheet(
                         placeholder = { Text("Any year (for example 2024)") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         singleLine = true,
-                        shape = RoundedCornerShape(10.dp),
+                        shape = RectangleShape,
                     )
                 }
             }
@@ -372,7 +378,7 @@ private fun FilterSheet(
                             placeholder = { Text("Find a tag") },
                             leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
                             singleLine = true,
-                            shape = RoundedCornerShape(10.dp),
+                            shape = RectangleShape,
                         )
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                             visibleTags.forEach { tag ->
@@ -392,7 +398,7 @@ private fun FilterSheet(
                 Button(
                     onClick = onDismiss,
                     modifier = Modifier.fillMaxWidth().height(50.dp),
-                    shape = RoundedCornerShape(10.dp),
+                    shape = RectangleShape,
                 ) {
                     Text("Show results", fontWeight = FontWeight.Bold)
                 }
@@ -446,3 +452,4 @@ private fun NullableChoiceFlow(choices: List<CatalogChoice>, selected: String?, 
         }
     }
 }
+

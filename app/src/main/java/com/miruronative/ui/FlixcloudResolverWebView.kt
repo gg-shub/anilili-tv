@@ -6,6 +6,7 @@ import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.miruronative.data.remote.FlixcloudBridge
@@ -51,3 +52,4 @@ fun FlixcloudResolverWebView() {
         modifier = Modifier.size(1.dp),
     )
 }
+

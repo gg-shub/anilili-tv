@@ -3,7 +3,6 @@ package com.miruronative.ui.adaptive
 import android.content.res.Configuration
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.border
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.getValue
@@ -11,6 +10,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.onFocusChanged
@@ -43,7 +43,7 @@ data class AppDeviceProfile(
 
     val posterWidth: Dp
         get() = when {
-            isTv -> 150.dp
+            isTv -> 180.dp
             isExpanded -> 152.dp
             isTablet -> 140.dp
             else -> 128.dp
@@ -51,7 +51,7 @@ data class AppDeviceProfile(
 
     val gridMinWidth: Dp
         get() = when {
-            isTv -> 145.dp
+            isTv -> 160.dp
             isExpanded -> 150.dp
             isTablet -> 132.dp
             else -> 110.dp
@@ -92,19 +92,20 @@ fun rememberAppDeviceProfile(): AppDeviceProfile {
 /** Clear focus treatment for TV remotes, keyboards, and game controllers. */
 @Composable
 fun Modifier.focusHighlight(
-    shape: Shape = RoundedCornerShape(12.dp),
-    focusedScale: Float = if (LocalAppDeviceProfile.current.isTv) 1.06f else 1.025f,
+    shape: Shape = RectangleShape,
+    focusedScale: Float = if (LocalAppDeviceProfile.current.isTv) 1.015f else 1.01f,
+    showBorder: Boolean = true
 ): Modifier {
     var focused by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(
         targetValue = if (focused) focusedScale else 1f,
         label = "focused-scale",
     )
-    val borderColor = if (focused) MaterialTheme.colorScheme.primary else Color.Transparent
+    val borderColor = if (focused && showBorder) MaterialTheme.colorScheme.primary else Color.Transparent
     return this
         .onFocusChanged { focused = it.isFocused || it.hasFocus }
         .zIndex(if (focused) 1f else 0f)
         .scale(scale)
         .clip(shape)
-        .border(width = if (focused) 3.dp else 0.dp, color = borderColor, shape = shape)
+        .border(width = 1.dp, color = borderColor, shape = shape)
 }

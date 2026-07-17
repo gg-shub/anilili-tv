@@ -12,26 +12,32 @@ import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Fullscreen
-import androidx.compose.material.icons.filled.FullscreenExit
-import androidx.compose.material.icons.filled.SkipNext
-import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.material3.AlertDialog
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.material.icons.filled.Subtitles
+import androidx.compose.material3.Button
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -48,6 +54,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -57,11 +64,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.miruronative.data.ProviderCatalog
 import com.miruronative.data.model.EpisodeItem
+import com.miruronative.data.model.StreamItem
 import com.miruronative.diagnostics.DiagnosticsLog
 import com.miruronative.playback.PlaybackService
 import com.miruronative.ui.UiState
@@ -79,7 +88,6 @@ fun WatchScreen(
     episode: String,
     inPictureInPicture: Boolean = false,
     onBack: () -> Unit,
-    onAnimeDetails: () -> Unit,
     vm: WatchViewModel = viewModel(),
 ) {
     LaunchedEffect(animeId, provider, category, episode) {
@@ -94,10 +102,17 @@ fun WatchScreen(
     var fullscreen by remember { mutableStateOf(device.isTv) }
     val activity = remember(context) { context.findActivity() }
     val currentOnBack by rememberUpdatedState(onBack)
+    var backPressedTime by remember { mutableLongStateOf(0L) }
     val pauseAndBack = remember {
         {
-            PlaybackService.pauseActivePlayback()
-            currentOnBack()
+            val currentTime = System.currentTimeMillis()
+            if (currentTime - backPressedTime < 2000) {
+                PlaybackService.pauseActivePlayback()
+                currentOnBack()
+            } else {
+                backPressedTime = currentTime
+                android.widget.Toast.makeText(context, "Press back again to exit", android.widget.Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -181,7 +196,21 @@ fun WatchScreen(
 
         when (val s = state) {
             is UiState.Loading -> {
-                LoadingBox()
+                // Only surface the "this can take a moment" note once loading is genuinely slow,
+                // so it doesn't flash by on the common fast (Miruro-first) path.
+                var showSlowNote by remember { mutableStateOf(false) }
+                LaunchedEffect(Unit) {
+                    delay(1_500)
+                    showSlowNote = true
+                }
+                LoadingBox(
+                    message = if (showSlowNote) {
+                        "Finding a source for this episode.\n" +
+                            "The first time you open a title we check every server, so it can take a few seconds."
+                    } else {
+                        null
+                    },
+                )
                 BackButton(pauseAndBack, Modifier.align(Alignment.TopStart))
             }
             is UiState.Error -> Column(Modifier.fillMaxSize()) {
@@ -191,7 +220,7 @@ fun WatchScreen(
                     modifier = Modifier
                         .align(Alignment.CenterHorizontally)
                         .padding(bottom = 24.dp)
-                        .focusHighlight(RoundedCornerShape(20.dp)),
+                        .focusHighlight(RectangleShape),
                 ) { Text("Open in web player") }
                 BackButton(pauseAndBack, Modifier.align(Alignment.Start))
             }
@@ -199,7 +228,6 @@ fun WatchScreen(
                 data = s.data,
                 fullscreen = fullscreen || inPictureInPicture,
                 onBack = pauseAndBack,
-                onAnimeDetails = onAnimeDetails,
                 onPrev = vm::prev,
                 onNext = vm::next,
                 onChangeSource = vm::changeSource,
@@ -222,7 +250,6 @@ private fun WatchContent(
     data: WatchData,
     fullscreen: Boolean,
     onBack: () -> Unit,
-    onAnimeDetails: () -> Unit,
     onPrev: () -> Unit,
     onNext: () -> Unit,
     onChangeSource: (String, String) -> Unit,
@@ -235,58 +262,12 @@ private fun WatchContent(
 ) {
     val device = LocalAppDeviceProfile.current
     val configuration = LocalConfiguration.current
-    var sourceMenuExpanded by remember { mutableStateOf(false) }
     val listFocus = remember { FocusRequester() }
 
     // TV: leaving fullscreen must hand focus to the episode/source area — otherwise it can
     // stay inside the player (or an embed WebView) and the D-pad never reaches the list.
     LaunchedEffect(fullscreen) {
         if (device.isTv && !fullscreen) runCatching { listFocus.requestFocus() }
-    }
-
-    // A dialog rather than a DropdownMenu: dialogs get reliable D-pad focus on TV, and the
-    // list is easier to hit on phones too.
-    if (sourceMenuExpanded) {
-        AlertDialog(
-            onDismissRequest = { sourceMenuExpanded = false },
-            title = { Text("Streaming source") },
-            text = {
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 400.dp)
-                        .verticalScroll(rememberScrollState()),
-                ) {
-                    data.sourceOptions.forEach { option ->
-                        val selected = option.provider == data.provider && option.category == data.category
-                        TextButton(
-                            onClick = {
-                                sourceMenuExpanded = false
-                                if (!selected) onChangeSource(option.provider, option.category.api)
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .focusHighlight(RoundedCornerShape(8.dp)),
-                        ) {
-                            Text(
-                                buildString {
-                                    append(ProviderCatalog.label(option.provider))
-                                    append(" ")
-                                    append(option.category.api.uppercase())
-                                    append(" • ${option.episodeCount} ep")
-                                    if (!option.hasCurrentEpisode) append(" • first available")
-                                    if (selected) append("  ✓")
-                                },
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { sourceMenuExpanded = false }) { Text("Close") }
-            },
-        )
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -313,12 +294,23 @@ private fun WatchContent(
                 stream.isEmbed || ProviderCatalog.isEmbed(data.provider) ->
                     Box(Modifier.fillMaxSize()) {
                         LaunchedEffect(stream.url) { PlaybackService.stopActivePlayback() }
+                        EmbedEpisodeNavigationEffect(
+                            hasPrevious = data.hasPrev,
+                            hasNext = data.hasNext,
+                            onPrevious = onPrev,
+                            onNext = onNext,
+                        )
                         EmbedWebView(
                             url = stream.url,
                             referer = stream.referer,
                             modifier = Modifier.fillMaxSize(),
+                            qualityStreams = data.sources.embedStreams,
+                            startPositionMs = data.startPositionMs,
                             skip = data.sources.skip,
+                            onPreviousEpisode = onPrev,
                             onNextEpisode = onNext,
+                            hasPreviousEpisode = data.hasPrev,
+                            hasNextEpisode = data.hasNext,
                             onFullscreenChanged = onFullscreenChanged,
                             onProgress = onProgress,
                         )
@@ -329,7 +321,7 @@ private fun WatchContent(
                             modifier = Modifier
                                 .align(Alignment.TopEnd)
                                 .padding(4.dp)
-                                .focusHighlight(RoundedCornerShape(24.dp)),
+                                .focusHighlight(RectangleShape),
                         ) {
                             Icon(
                                 if (fullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
@@ -338,29 +330,32 @@ private fun WatchContent(
                             )
                         }
                     }
-                else -> PlayerSurface(
-                    stream = stream,
-                    subtitles = data.sources.subtitles,
-                    skip = data.sources.skip,
-                    seriesTitle = data.seriesTitle,
-                    episodeTitle = "Episode ${data.current.displayNumber}" +
-                        (data.current.title?.let { ": $it" } ?: ""),
-                    artworkUrl = data.artworkUrl,
-                    animeId = data.anilistId,
-                    provider = data.provider,
-                    category = data.category.api,
-                    episode = data.current.displayNumber,
-                    onEnded = { if (com.miruronative.data.settings.SettingsStore.autoplay.value) onNext() },
-                    onNextEpisode = onNext,
-                    onError = onPlaybackError,
-                    modifier = Modifier.fillMaxSize(),
-                    onToggleFullscreen = onToggleFullscreen,
-                    startPositionMs = data.startPositionMs,
-                    onProgress = onProgress,
-                    onPreviousEpisode = onPrev,
-                    hasNextEpisode = data.hasNext,
-                    hasPreviousEpisode = data.hasPrev,
-                )
+                else -> {
+                    PlayerSurface(
+                        stream = stream,
+                        qualityStreams = data.sources.streams.filterNot(StreamItem::isEmbed),
+                        subtitles = data.sources.subtitles,
+                        skip = data.sources.skip,
+                        seriesTitle = data.seriesTitle,
+                        episodeTitle = "Episode ${data.current.displayNumber}" +
+                            (data.current.title?.let { ": $it" } ?: ""),
+                        artworkUrl = data.artworkUrl,
+                        animeId = data.anilistId,
+                        provider = data.provider,
+                        category = data.category.api,
+                        episode = data.current.displayNumber,
+                        onEnded = { if (com.miruronative.data.settings.SettingsStore.autoplay.value) onNext() },
+                        onNextEpisode = onNext,
+                        onError = onPlaybackError,
+                        modifier = Modifier.fillMaxSize(),
+                        onToggleFullscreen = onToggleFullscreen,
+                        startPositionMs = data.startPositionMs,
+                        onProgress = onProgress,
+                        onPreviousEpisode = onPrev,
+                        hasNextEpisode = data.hasNext,
+                        hasPreviousEpisode = data.hasPrev,
+                    )
+                }
             }
             if (data.isResolving) {
                 Box(
@@ -400,53 +395,19 @@ private fun WatchContent(
                         )
                         Text(
                             text = "Episode ${data.current.displayNumber}" +
-                                (data.current.title?.let { ": $it" } ?: "") +
-                                " • ${ProviderCatalog.label(data.provider)} ${data.category.api.uppercase()}",
+                                (data.current.title?.let { ": $it" } ?: ""),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
-                    IconButton(
-                        onClick = onPrev,
-                        enabled = data.hasPrev,
-                        modifier = Modifier.focusHighlight(RoundedCornerShape(24.dp)),
-                    ) {
-                        Icon(Icons.Default.SkipPrevious, contentDescription = "Previous episode")
-                    }
-                    IconButton(
-                        onClick = onNext,
-                        enabled = data.hasNext,
-                        modifier = Modifier.focusHighlight(RoundedCornerShape(24.dp)),
-                    ) {
-                        Icon(Icons.Default.SkipNext, contentDescription = "Next episode")
-                    }
                 }
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = device.pagePadding, vertical = 0.dp)
-                        .focusGroup(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    TextButton(
-                        onClick = onAnimeDetails,
-                        modifier = Modifier
-                            .focusRequester(listFocus)
-                            .focusHighlight(RoundedCornerShape(20.dp)),
-                    ) {
-                        Text("Anime page")
-                    }
-                    TextButton(
-                        onClick = { sourceMenuExpanded = true },
-                        enabled = data.sourceOptions.isNotEmpty(),
-                        modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp)),
-                    ) {
-                        Text("Source: ${ProviderCatalog.label(data.provider)} ${data.category.api.uppercase()}")
-                    }
-                }
+                SourceSelectors(
+                    data = data,
+                    onChangeSource = onChangeSource,
+                    focusRequester = listFocus,
+                )
                 data.notice?.let { notice ->
                     Text(
                         text = notice,
@@ -481,6 +442,290 @@ private fun WatchContent(
     }
 }
 
+/** Compact Server + Audio (sub/dub) dropdowns on one line, replacing the combined source list. */
+@Composable
+private fun SourceSelectors(
+    data: WatchData,
+    onChangeSource: (String, String) -> Unit,
+    focusRequester: FocusRequester,
+) {
+    val device = LocalAppDeviceProfile.current
+    val servers = remember(data.sourceOptions) { data.sourceOptions.map { it.provider }.distinct() }
+    val audioForServer = remember(data.sourceOptions, data.provider) {
+        data.sourceOptions.filter { it.provider == data.provider }.map { it.category }.distinct()
+    }
+    // While the Anivexa catalog is still loading, list the servers we're still checking so their
+    // absence reads as "loading", not "unavailable".
+    val pendingServers = remember(servers, data.isLoadingMoreSources) {
+        if (data.isLoadingMoreSources) ProviderCatalog.anivexaProviders.filterNot { it in servers } else emptyList()
+    }
+    var showServerDialog by remember { mutableStateOf(false) }
+
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = device.pagePadding, vertical = 4.dp)
+            .focusGroup(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // Server also carries the TV focus anchor for leaving fullscreen.
+        CompactClickablePill(
+            label = ProviderCatalog.label(data.provider),
+            enabled = servers.isNotEmpty(),
+            focusRequester = focusRequester,
+            onClick = { showServerDialog = true }
+        )
+        CompactDropdown(
+            label = data.category.api.uppercase(),
+            enabled = audioForServer.size > 1,
+        ) { dismiss ->
+            audioForServer.forEach { category ->
+                val selected = category == data.category
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            category.api.uppercase(),
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                            color = if (selected) MaterialTheme.colorScheme.primary else Color.Unspecified,
+                        )
+                    },
+                    trailingIcon = if (selected) {
+                        { Icon(Icons.Filled.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary) }
+                    } else null,
+                    onClick = {
+                        dismiss()
+                        if (!selected) onChangeSource(data.provider, category.api)
+                    },
+                )
+            }
+        }
+        if (data.isLoadingMoreSources) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(14.dp),
+                    strokeWidth = 2.dp,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    text = "More servers…",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+
+    if (showServerDialog) {
+        Dialog(onDismissRequest = {
+            showServerDialog = false
+            if (device.isTv) runCatching { focusRequester.requestFocus() }
+        }) {
+            Box(
+                modifier = Modifier
+                    .widthIn(max = 440.dp)
+                    .fillMaxWidth()
+                    .clip(RectangleShape)
+                    .background(MaterialTheme.colorScheme.surface)
+                    .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.3f), RectangleShape)
+                    .padding(20.dp)
+            ) {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Select Server",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = if (pendingServers.isEmpty()) "${servers.size} available"
+                                else "${servers.size} ready · checking more…",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 280.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val columns = if (device.isTv) 4 else 3
+                        // Ready servers first, then the ones we're still checking (spinner cells).
+                        val cells = servers.map { it to true } + pendingServers.map { it to false }
+                        val rows = cells.chunked(columns)
+                        rows.forEach { rowCells ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                rowCells.forEach { (server, ready) ->
+                                    val selected = ready && server == data.provider
+                                    val bg = when {
+                                        selected -> MaterialTheme.colorScheme.primary
+                                        ready -> MaterialTheme.colorScheme.surfaceVariant
+                                        else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                                    }
+                                    val textColor = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(44.dp)
+                                            .then(if (ready) Modifier.focusHighlight(RectangleShape) else Modifier)
+                                            .clip(RectangleShape)
+                                            .background(bg)
+                                            .border(
+                                                1.dp,
+                                                if (selected) MaterialTheme.colorScheme.primary
+                                                else MaterialTheme.colorScheme.outline,
+                                                RectangleShape
+                                            )
+                                            .then(
+                                                if (ready) {
+                                                    Modifier.clickable {
+                                                        showServerDialog = false
+                                                        if (device.isTv) runCatching { focusRequester.requestFocus() }
+                                                        if (!selected) {
+                                                            val options = data.sourceOptions.filter { it.provider == server }
+                                                            val category = options.firstOrNull { it.category == data.category }?.category
+                                                                ?: options.first().category
+                                                            onChangeSource(server, category.api)
+                                                        }
+                                                    }
+                                                } else {
+                                                    Modifier
+                                                }
+                                            ),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        if (ready) {
+                                            Text(
+                                                text = ProviderCatalog.label(server),
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                                color = textColor,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.padding(horizontal = 4.dp)
+                                            )
+                                        } else {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                                modifier = Modifier.padding(horizontal = 4.dp),
+                                            ) {
+                                                CircularProgressIndicator(
+                                                    modifier = Modifier.size(12.dp),
+                                                    strokeWidth = 2.dp,
+                                                    color = MaterialTheme.colorScheme.primary,
+                                                )
+                                                Text(
+                                                    text = ProviderCatalog.label(server),
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                                repeat(columns - rowCells.size) {
+                                    Spacer(modifier = Modifier.weight(1f))
+                                }
+                            }
+                        }
+                    }
+
+                    TextButton(
+                        onClick = {
+                            showServerDialog = false
+                            if (device.isTv) runCatching { focusRequester.requestFocus() }
+                        },
+                        modifier = Modifier.align(Alignment.End)
+                    ) {
+                        Text("Close")
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Compact bordered pill that triggers an onClick callback. */
+@Composable
+private fun CompactClickablePill(
+    label: String,
+    enabled: Boolean,
+    focusRequester: FocusRequester? = null,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .focusHighlight(RectangleShape)
+            .clip(RectangleShape)
+            .background(MaterialTheme.colorScheme.surface)
+            .border(1.dp, MaterialTheme.colorScheme.outline, RectangleShape)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(start = 12.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyMedium)
+        Icon(
+            Icons.Filled.ArrowDropDown,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** Compact bordered pill that opens a dropdown menu. */
+@Composable
+private fun CompactDropdown(
+    label: String,
+    enabled: Boolean,
+    focusRequester: FocusRequester? = null,
+    content: @Composable ColumnScope.(dismiss: () -> Unit) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        Row(
+            modifier = Modifier
+                .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+                .focusHighlight(RectangleShape)
+                .clip(RectangleShape)
+                .background(MaterialTheme.colorScheme.surface)
+                .border(1.dp, MaterialTheme.colorScheme.outline, RectangleShape)
+                .clickable(enabled = enabled) { expanded = true }
+                .padding(start = 12.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(label, style = MaterialTheme.typography.bodyMedium)
+            Icon(
+                Icons.Filled.ArrowDropDown,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            content { expanded = false }
+        }
+    }
+}
+
 @Composable
 private fun EpisodeChip(
     episode: EpisodeItem,
@@ -495,14 +740,14 @@ private fun EpisodeChip(
     }
     Box(
         modifier = modifier
-            .focusHighlight(RoundedCornerShape(8.dp))
+            .focusHighlight(RectangleShape)
             .height(44.dp)
-            .clip(RoundedCornerShape(8.dp))
+            .clip(RectangleShape)
             .background(background)
             .border(
                 1.dp,
                 if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
-                RoundedCornerShape(8.dp),
+                RectangleShape,
             )
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
@@ -537,8 +782,39 @@ private fun NoSource(onWebFallback: () -> Unit) {
             )
             TextButton(
                 onClick = onWebFallback,
-                modifier = Modifier.focusHighlight(RoundedCornerShape(20.dp)),
+                modifier = Modifier.focusHighlight(RectangleShape),
             ) { Text("Open in web player") }
+        }
+    }
+}
+
+@Composable
+private fun EmbedEpisodeNavigationEffect(
+    hasPrevious: Boolean,
+    hasNext: Boolean,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+) {
+    val currentHasPrevious by rememberUpdatedState(hasPrevious)
+    val currentHasNext by rememberUpdatedState(hasNext)
+    val currentOnPrevious by rememberUpdatedState(onPrevious)
+    val currentOnNext by rememberUpdatedState(onNext)
+
+    DisposableEffect(Unit) {
+        val navigator: (Int) -> Unit = { direction ->
+            DiagnosticsLog.event("Embed player episode navigator direction=$direction")
+            when {
+                direction > 0 && currentHasNext -> currentOnNext()
+                direction < 0 && currentHasPrevious -> currentOnPrevious()
+            }
+        }
+        PlaybackService.episodeNavigator = navigator
+        DiagnosticsLog.event("Embed player episode navigator registered hasPrev=$hasPrevious hasNext=$hasNext")
+        onDispose {
+            if (PlaybackService.episodeNavigator === navigator) {
+                PlaybackService.episodeNavigator = null
+            }
+            DiagnosticsLog.event("Embed player episode navigator cleared")
         }
     }
 }
@@ -547,7 +823,7 @@ private fun NoSource(onWebFallback: () -> Unit) {
 private fun BackButton(onBack: () -> Unit, modifier: Modifier = Modifier) {
     IconButton(
         onClick = onBack,
-        modifier = modifier.padding(4.dp).focusHighlight(RoundedCornerShape(24.dp)),
+        modifier = modifier.padding(4.dp).focusHighlight(RectangleShape),
     ) {
         Icon(
             Icons.AutoMirrored.Filled.ArrowBack,
@@ -565,3 +841,4 @@ private fun Context.findActivity(): Activity? {
     }
     return null
 }
+

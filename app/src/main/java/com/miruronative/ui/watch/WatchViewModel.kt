@@ -19,8 +19,13 @@ import com.miruronative.ui.UiState
 import com.miruronative.ui.rethrowIfCancellation
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+
+/** How long a ready stream waits on the AniSkip lookup before starting without markers. */
+private const val ANISKIP_WAIT_MS = 2_500L
 
 data class WatchData(
     val episodes: List<EpisodeItem>,
@@ -35,6 +40,8 @@ data class WatchData(
     val artworkUrl: String?,
     val startPositionMs: Long = 0,
     val isResolving: Boolean = false,
+    /** The fast Miruro sources are shown; the slower Anivexa servers are still loading in. */
+    val isLoadingMoreSources: Boolean = false,
     val notice: String? = null,
 ) {
     val current: EpisodeItem get() = episodes[currentIndex]
@@ -62,9 +69,13 @@ class WatchViewModel : ViewModel() {
     private var startedKey: String? = null
     private var seriesTitle = "Anime"
     private var artworkUrl: String? = null
+    private var totalEpisodes: Int? = null
+    private val syncedAniListEpisodes = mutableSetOf<Int>()
     private var lastRequestedNumber = 1.0
     private var failedProviders = mutableSetOf<String>()
     private var resolveJob: Job? = null
+    private var anivexaMergeJob: Job? = null
+    private var mergedIncludesAnivexa = false
     private var mergedEpisodes = EpisodesResult(emptyList())
 
     fun start(id: Int, providerName: String, categoryApi: String, episodeNumber: String) {
@@ -78,12 +89,31 @@ class WatchViewModel : ViewModel() {
         anilistId = id
         category = Category.from(categoryApi)
         preferred = providerName
+        totalEpisodes = null
+        syncedAniListEpisodes.clear()
+        failedProviders.clear()
+        mergedIncludesAnivexa = false
 
-        viewModelScope.launch {
+        resolveJob?.cancel()
+        anivexaMergeJob?.cancel()
+        resolveJob = viewModelScope.launch {
             _state.value = UiState.Loading
             try {
                 DiagnosticsLog.event("Watch episodes load start id=$id")
-                val merged = repo.episodes(id)
+                // Fast path: start from the Miruro pipe alone so playback isn't held behind the
+                // slower multi-provider Anivexa catalog. The Anivexa providers fold in afterwards
+                // via launchAnivexaMerge. Only wait on the full catalog when Miruro yields nothing,
+                // or the requested provider is an Anivexa one (e.g. resuming on such a server).
+                val miruro = runCatching { repo.miruroEpisodes(id) }
+                    .onFailure { DiagnosticsLog.throwable("Watch miruro episodes failed id=$id", it) }
+                    .getOrDefault(EpisodesResult(emptyList()))
+                val preferredIsAnivexa =
+                    ProviderCatalog.sourceOf(preferred) == ProviderCatalog.Source.ANIVEXA
+                val merged = if (!miruro.isEmpty && !preferredIsAnivexa) {
+                    miruro
+                } else {
+                    repo.episodes(id).also { mergedIncludesAnivexa = true }
+                }
                 DiagnosticsLog.event(
                     "Watch episodes load success id=$id providers=" +
                         merged.providers.joinToString { provider ->
@@ -94,6 +124,7 @@ class WatchViewModel : ViewModel() {
                 repo.animeInfo(id)?.let { info ->
                     seriesTitle = info.title.preferred
                     artworkUrl = info.coverImage.best
+                    totalEpisodes = info.episodes
                     DiagnosticsLog.event("Watch animeInfo success id=$id title=${seriesTitle.take(80)}")
                 }
                 spine = pickSpine(merged)
@@ -104,6 +135,7 @@ class WatchViewModel : ViewModel() {
                 if (spine.isEmpty()) error("No episodes for this title")
                 val startNumber = episodeNumber.toDoubleOrNull() ?: spine.first().number
                 resolveAndPlay(startNumber)
+                if (!mergedIncludesAnivexa) launchAnivexaMerge(id)
             } catch (e: Exception) {
                 e.rethrowIfCancellation()
                 DiagnosticsLog.throwable("Watch start failed key=$key", e)
@@ -112,29 +144,75 @@ class WatchViewModel : ViewModel() {
         }
     }
 
-    /** Navigation spine: the chosen provider's episode list, else whichever has the most episodes. */
+    /**
+     * Fold the slower Anivexa providers in once they arrive, without disturbing playback that
+     * already started on a Miruro source. Refreshes the navigation spine and the source list so
+     * the extra servers become selectable; the active stream and resolving flag are left as-is.
+     */
+    private fun launchAnivexaMerge(id: Int) {
+        anivexaMergeJob?.cancel()
+        anivexaMergeJob = viewModelScope.launch {
+            val anivexa = runCatching { repo.anivexaEpisodes(id) }
+                .onFailure { DiagnosticsLog.throwable("Watch anivexa merge failed id=$id", it) }
+                .getOrNull()
+            if (anivexa != null && !anivexa.isEmpty) {
+                mergedEpisodes = repo.mergeProviders(mergedEpisodes, anivexa)
+                spine = pickSpine(mergedEpisodes)
+                DiagnosticsLog.event(
+                    "Watch anivexa merge applied id=$id providers=" + mergedEpisodes.providerNames.joinToString(),
+                )
+            }
+            mergedIncludesAnivexa = true
+            // Reflect completion whether or not Anivexa added anything: the extra servers become
+            // selectable and the "loading more servers" hint clears.
+            val data = (_state.value as? UiState.Success)?.data ?: return@launch
+            val number = data.current.number
+            val index = spine.indexOfFirst { it.number == number }.coerceAtLeast(0)
+            _state.value = UiState.Success(
+                data.copy(
+                    episodes = spine,
+                    currentIndex = index,
+                    sourceOptions = sourceOptions(number),
+                    isLoadingMoreSources = false,
+                ),
+            )
+        }
+    }
+
+    /**
+     * Navigation spine: the longest provider episode list, so Next never dead-ends just because
+     * the launched provider's list lags behind the others. Ties keep the chosen provider; source
+     * resolution still tries the preferred provider first and falls back per episode.
+     */
     private fun pickSpine(merged: EpisodesResult): List<EpisodeItem> {
-        merged.provider(preferred)?.episodes(category)?.takeIf { it.isNotEmpty() }?.let { return it }
-        return merged.providers.map { it.episodes(category) }.maxByOrNull { it.size } ?: emptyList()
+        return pickNavigationSpine(merged, preferred, category)
     }
 
     private suspend fun resolveAndPlay(number: Double) {
+        val requestedProvider = preferred
         DiagnosticsLog.event(
-            "Watch resolve start id=$anilistId episode=${fmt(number)} preferred=$preferred " +
+            "Watch resolve start id=$anilistId episode=${fmt(number)} preferred=$requestedProvider " +
                 "category=${category.api} excluded=${failedProviders.joinToString()}",
         )
         lastRequestedNumber = number
+        // Fetched alongside source resolution: fills intro/outro markers for providers that
+        // don't ship their own, so auto-skip keeps working after a provider fallback.
+        val aniSkipFallback = viewModelScope.async {
+            runCatching { repo.skipTimes(anilistId, number) }.getOrNull()
+        }
         val previous = (_state.value as? UiState.Success)?.data
         _state.value = previous?.let { UiState.Success(it.copy(isResolving = true, notice = null)) }
             ?: UiState.Loading
         val resolved = repo.resolveSources(
             anilistId = anilistId,
             number = number,
-            preferred = preferred,
+            preferred = requestedProvider,
             category = category,
+            episodes = mergedEpisodes,
             excludedProviders = failedProviders,
         )
         if (resolved == null) {
+            aniSkipFallback.cancel()
             val message = "No playable source for episode ${fmt(number)} on any server"
             DiagnosticsLog.event("Watch resolve no source id=$anilistId episode=${fmt(number)}")
             _state.value = previous?.let {
@@ -142,15 +220,40 @@ class WatchViewModel : ViewModel() {
             } ?: UiState.Error(message)
             return
         }
+        val fallbackNotice = if (resolved.provider != requestedProvider) {
+            "${ProviderCatalog.label(requestedProvider)} is unavailable for this episode. " +
+                "Playing ${ProviderCatalog.label(resolved.provider)} instead."
+        } else {
+            null
+        }
+        if (fallbackNotice != null) {
+            DiagnosticsLog.event(
+                "Watch provider fallback requested=$requestedProvider actual=${resolved.provider} " +
+                    "episode=${fmt(number)}",
+            )
+        }
         preferred = resolved.provider // stick with whatever actually served the stream
+        val sources = if (resolved.sources.skip == null) {
+            val fallbackSkip = withTimeoutOrNull(ANISKIP_WAIT_MS) { aniSkipFallback.await() }
+            fallbackSkip?.let { resolved.sources.copy(skip = it) } ?: resolved.sources
+        } else {
+            aniSkipFallback.cancel()
+            resolved.sources
+        }
         val index = spine.indexOfFirst { it.number == number }.coerceAtLeast(0)
         val resume = LibraryStore.historyFor(anilistId)?.takeIf { it.episodeNumber == number }?.positionMs ?: 0L
-        val chosen = pickStream(resolved.sources)
+        val chosen = pickProviderStream(resolved.provider, resolved.sources)
         DiagnosticsLog.event(
             "Watch resolve success provider=${resolved.provider} episode=${fmt(number)} index=$index " +
-                "hls=${resolved.sources.hlsStreams.size} direct=${resolved.sources.streams.size} " +
+                "hls=${resolved.sources.hlsStreams.size} total=${resolved.sources.streams.size} " +
                 "embed=${resolved.sources.embedStreams.size} subtitles=${resolved.sources.subtitles.size} " +
                 "chosen=${chosen?.diagnosticLabel() ?: "none"} resumeMs=$resume",
+        )
+        DiagnosticsLog.event(
+            "Watch source inventory provider=${resolved.provider} " +
+                resolved.sources.streams.joinToString(separator = ",", limit = 16, truncated = "...") {
+                    "${it.diagnosticLabel()}${if (it.isActive) "*" else ""}"
+                },
         )
         _state.value = UiState.Success(
             WatchData(
@@ -160,12 +263,14 @@ class WatchViewModel : ViewModel() {
                 category = category,
                 sourceOptions = sourceOptions(number),
                 anilistId = anilistId,
-                sources = resolved.sources,
+                sources = sources,
                 chosenStream = chosen,
                 seriesTitle = seriesTitle,
                 artworkUrl = artworkUrl,
                 startPositionMs = resume,
                 isResolving = false,
+                isLoadingMoreSources = !mergedIncludesAnivexa,
+                notice = fallbackNotice,
             ),
         )
         recordHistory(number, resolved.provider)
@@ -200,19 +305,33 @@ class WatchViewModel : ViewModel() {
                 durationMs = LibraryStore.historyFor(anilistId)?.takeIf { it.episodeNumber == number }?.durationMs ?: 0L,
             ),
         )
-        if (AuthManager.isLoggedIn && SettingsStore.autoSyncAniList.value) {
-            runCatching { repo.saveAniListProgress(anilistId, number.toInt()) }
-                .onFailure { DiagnosticsLog.throwable("Watch AniList progress sync failed id=$anilistId episode=${fmt(number)}", it) }
-        }
     }
 
     private var lastProgressSave = 0L
     fun onProgress(positionMs: Long, durationMs: Long) {
         val data = (_state.value as? UiState.Success)?.data ?: return
+        maybeSyncAniListProgress(data.current.number, positionMs, durationMs)
         val now = System.currentTimeMillis()
         if (now - lastProgressSave < 8_000) return
         lastProgressSave = now
         LibraryStore.updateProgress(anilistId, data.current.number, positionMs, durationMs)
+    }
+
+    private fun maybeSyncAniListProgress(episodeNumber: Double, positionMs: Long, durationMs: Long) {
+        if (!AuthManager.isLoggedIn || !SettingsStore.autoSyncAniList.value) return
+        if (!shouldSyncAniListProgress(episodeNumber, positionMs, durationMs)) return
+        val episode = episodeNumber.toInt()
+        if (!syncedAniListEpisodes.add(episode)) return
+        viewModelScope.launch {
+            runCatching { repo.saveAniListProgress(anilistId, episode, totalEpisodes) }
+                .onFailure {
+                    syncedAniListEpisodes.remove(episode)
+                    DiagnosticsLog.throwable(
+                        "Watch AniList progress sync failed id=$anilistId episode=${fmt(episodeNumber)}",
+                        it,
+                    )
+                }
+        }
     }
 
     fun playIndex(index: Int) {
@@ -277,13 +396,6 @@ class WatchViewModel : ViewModel() {
         }
     }
 
-    private fun pickStream(sources: SourcesResult): StreamItem? =
-        sources.hlsStreams.maxByOrNull { (it.height ?: 0) + if (it.isActive) 100_000 else 0 }
-            // Any other direct stream (progressive MP4) still beats a WebView embed.
-            ?: sources.streams.firstOrNull { !it.isEmbed }
-            ?: sources.embedStreams.firstOrNull()
-            ?: sources.streams.firstOrNull()
-
     private fun sourceOptions(number: Double): List<WatchSourceOption> =
         mergedEpisodes.providers
             .flatMap { provider ->
@@ -308,6 +420,67 @@ class WatchViewModel : ViewModel() {
             isHls -> "hls"
             else -> "direct"
         }
-        return "$type height=${height ?: "auto"} host=${runCatching { Uri.parse(url).host }.getOrNull() ?: "unknown"}"
+        return "$type label=${label.take(48)} audio=${audio ?: "unknown"} " +
+            "height=${height ?: "auto"} host=${runCatching { Uri.parse(url).host }.getOrNull() ?: "unknown"}"
     }
+}
+
+internal fun shouldSyncAniListProgress(episodeNumber: Double, positionMs: Long, durationMs: Long): Boolean {
+    if (episodeNumber < 1 || episodeNumber % 1.0 != 0.0) return false
+    if (durationMs < MIN_ANILIST_SYNC_DURATION_MS || positionMs <= 0) return false
+    return positionMs.toDouble() / durationMs >= ANILIST_SYNC_WATCHED_FRACTION
+}
+
+private const val MIN_ANILIST_SYNC_DURATION_MS = 60_000L
+private const val ANILIST_SYNC_WATCHED_FRACTION = 0.80
+
+/** Provider-specific first-player policy, applied only after that provider has resolved sources. */
+internal fun pickProviderStream(provider: String, sources: SourcesResult): StreamItem? {
+    val direct = sources.streams.filterNot(StreamItem::isEmbed)
+    val embeds = sources.embedStreams
+
+    return when (provider) {
+        // Kwik's fixed-quality CDN URLs currently return 403 outside its page. The embed carries
+        // the cookies/player flow those URLs require, so do not leave Media3 buffering forever.
+        "kiwi" -> embeds.firstOrNull(StreamItem::isActive)
+            ?: embeds.firstOrNull()
+            ?: bestHls(direct)
+            ?: direct.firstOrNull()
+
+        // Ally mixes AllAnime progressive files with an unreliable HLS mirror. Its direct files
+        // are independently playable and retain the selected SUB/DUB category.
+        "ally" -> direct.firstOrNull { !it.isHls }
+            ?: bestHls(direct)
+            ?: embeds.firstOrNull()
+
+        else -> bestHls(direct)
+            ?: direct.firstOrNull()
+            ?: embeds.firstOrNull(StreamItem::isActive)
+            ?: embeds.firstOrNull()
+            ?: sources.streams.firstOrNull()
+    }
+}
+
+private fun bestHls(streams: List<StreamItem>): StreamItem? = streams
+    .filter(StreamItem::isHls)
+    .maxByOrNull { (it.height ?: 0) + if (it.isActive) 100_000 else 0 }
+
+internal fun pickNavigationSpine(
+    episodes: EpisodesResult,
+    preferred: String,
+    category: Category,
+): List<EpisodeItem> {
+    fun normalized(provider: String): List<EpisodeItem> = episodes.provider(provider)
+        ?.episodes(category)
+        .orEmpty()
+        .distinctBy(EpisodeItem::number)
+        .sortedBy(EpisodeItem::number)
+
+    val preferredList = normalized(preferred)
+    val longest = episodes.providerNames
+        .asSequence()
+        .map(::normalized)
+        .maxByOrNull(List<EpisodeItem>::size)
+        .orEmpty()
+    return if (preferredList.size >= longest.size) preferredList else longest
 }

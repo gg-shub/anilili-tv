@@ -4,6 +4,7 @@ import android.webkit.WebView
 import android.view.View
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.foundation.layout.size
@@ -54,3 +55,4 @@ fun PipeWebView() {
         modifier = Modifier.size(1.dp),
     )
 }
+
