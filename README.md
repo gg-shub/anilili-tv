@@ -12,11 +12,11 @@ Miruro streams are requested through the Miruro pipe endpoint and decoded on dev
 
 <p align="center">
   <a href="showcase/home1.png"><img src="showcase/home1.png" width="400" alt="Anilili-TV home screen" /></a>
-  <a href="showcase/search.png"><img src="showcase/search.png" width="180" alt="Anime search screen" /></a>
-  <a href="showcase/details.png"><img src="showcase/details.png" width="180" alt="Anime details and server selection" /></a>
+  <a href="showcase/search.png"><img src="showcase/search.png" width="400" alt="Anime search screen" /></a>
+  <a href="showcase/details.png"><img src="showcase/details.png" width="400" alt="Anime details and server selection" /></a>
 </p>
 <p align="center">
-  <a href="showcase/home2.png"><img src="showcase/home2.png" width="180" alt="Anilili-TV home screen" /></a>
-  <a href="showcase/schedule.png"><img src="showcase/schedule.png" width="180" alt="Anime Releases Schedule" /></a>
+  <a href="showcase/home2.png"><img src="showcase/home2.png" width="400" alt="Anilili-TV home screen" /></a>
+  <a href="showcase/schedule.png"><img src="showcase/schedule.png" width="400" alt="Anime Releases Schedule" /></a>
  </a>
 </p>
