@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SkipNext
@@ -57,7 +58,6 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
@@ -121,6 +121,14 @@ fun EmbedWebView(
     val activeReferer = activeQualityStream?.referer ?: referer
     var qualityDialogVisible by remember(url) { mutableStateOf(false) }
     var speedDialogVisible by remember(url) { mutableStateOf(false) }
+    var controlsVisible by remember { mutableStateOf(true) }
+    var controlsInteracted by remember { mutableStateOf(0L) }
+    LaunchedEffect(controlsInteracted) {
+        if (controlsVisible) {
+            delay(5000)
+            controlsVisible = false
+        }
+    }
     var playbackSpeed by remember(url) { mutableStateOf(1f) }
     var webPlaybackAvailable by remember(activeUrl) { mutableStateOf(false) }
     var pendingSeekMs by remember(url, startPositionMs) { mutableLongStateOf(startPositionMs) }
@@ -399,6 +407,24 @@ fun EmbedWebView(
                     object : WebView(ctx) {
                         override fun dispatchKeyEvent(event: KeyEvent): Boolean {
                             if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                                if (!controlsVisible) {
+                                    val isNavOrEnter = event.keyCode == KeyEvent.KEYCODE_DPAD_UP ||
+                                        event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN ||
+                                        event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT ||
+                                        event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ||
+                                        event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+                                        event.keyCode == KeyEvent.KEYCODE_ENTER ||
+                                        event.keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
+
+                                    if (isNavOrEnter) {
+                                        controlsVisible = true
+                                        controlsInteracted = System.currentTimeMillis()
+                                        return true
+                                    }
+                                } else {
+                                    controlsInteracted = System.currentTimeMillis()
+                                }
+
                                 when {
                                     event.keyCode == KeyEvent.KEYCODE_DPAD_UP &&
                                         (currentHasNextEpisode || currentHasPreviousEpisode) -> {
@@ -529,11 +555,11 @@ fun EmbedWebView(
             }
         }
 
+        androidx.compose.animation.AnimatedVisibility(visible = controlsVisible, modifier = Modifier.align(Alignment.TopCenter)) {
         Row(
             modifier = Modifier
-                .align(Alignment.TopCenter)
                 .padding(top = 12.dp)
-                .background(Color.Black.copy(alpha = 0.68f), RectangleShape)
+                .background(Color.Black.copy(alpha = 0.68f), RoundedCornerShape(4.dp))
                 .onPreviewKeyEvent { event ->
                     if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                     when {
@@ -555,24 +581,11 @@ fun EmbedWebView(
                 .focusGroup(),
         ) {
             IconButton(
-                onClick = { currentOnPreviousEpisode?.invoke() },
-                enabled = hasPreviousEpisode && currentOnPreviousEpisode != null,
-                modifier = Modifier
-                    .focusRequester(previousFocus)
-                    .focusHighlight(RectangleShape),
-            ) {
-                Icon(
-                    Icons.Default.SkipPrevious,
-                    contentDescription = "Previous episode",
-                    tint = Color.White,
-                )
-            }
-            IconButton(
                 onClick = { currentOnNextEpisode?.invoke() },
                 enabled = hasNextEpisode && currentOnNextEpisode != null,
                 modifier = Modifier
                     .focusRequester(nextFocus)
-                    .focusHighlight(RectangleShape),
+                    .focusHighlight(RoundedCornerShape(4.dp)),
             ) {
                 Icon(
                     Icons.Default.SkipNext,
@@ -583,7 +596,7 @@ fun EmbedWebView(
             if (embedQualityStreams.size > 1) {
                 IconButton(
                     onClick = { qualityDialogVisible = true },
-                    modifier = Modifier.focusHighlight(RectangleShape),
+                    modifier = Modifier.focusHighlight(RoundedCornerShape(4.dp)),
                 ) {
                     Icon(
                         Icons.Default.Settings,
@@ -595,7 +608,7 @@ fun EmbedWebView(
             if (webPlaybackAvailable) {
                 IconButton(
                     onClick = { speedDialogVisible = true },
-                    modifier = Modifier.focusHighlight(RectangleShape),
+                    modifier = Modifier.focusHighlight(RoundedCornerShape(4.dp)),
                 ) {
                     Icon(
                         Icons.Default.Speed,
@@ -604,6 +617,8 @@ fun EmbedWebView(
                     )
                 }
             }
+        }
+
         }
 
         val action: Pair<String, () -> Unit>? = when {
@@ -621,16 +636,25 @@ fun EmbedWebView(
                 label = label,
                 onClick = onClick,
                 modifier = Modifier.align(Alignment.BottomStart),
+                controlsVisible = controlsVisible,
             )
         }
     }
 }
 
 @Composable
-private fun WebSkipButton(label: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun WebSkipButton(label: String, onClick: () -> Unit, modifier: Modifier = Modifier, controlsVisible: Boolean = false) {
+    val focusRequester = remember { FocusRequester() }
+    val device = LocalAppDeviceProfile.current
+    LaunchedEffect(Unit, controlsVisible) {
+        if (device.isTv) {
+            delay(32)
+            runCatching { focusRequester.requestFocus() }
+        }
+    }
     OutlinedButton(
         onClick = onClick,
-        shape = RectangleShape,
+        shape = RoundedCornerShape(3.dp),
         border = BorderStroke(1.dp, Color.White.copy(alpha = 0.55f)),
         colors = ButtonDefaults.outlinedButtonColors(
             containerColor = Color.Black.copy(alpha = 0.5f),
@@ -638,7 +662,8 @@ private fun WebSkipButton(label: String, onClick: () -> Unit, modifier: Modifier
         ),
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
         modifier = modifier
-            .padding(start = 24.dp, bottom = 24.dp),
+            .padding(start = 24.dp, bottom = 24.dp)
+            .focusRequester(focusRequester),
     ) {
         Text(
             label.uppercase(),
@@ -857,4 +882,3 @@ private class WebProgressBridge(
         onVideoAvailableCallback()
     }
 }
-

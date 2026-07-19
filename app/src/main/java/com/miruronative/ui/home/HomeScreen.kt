@@ -61,6 +61,7 @@ import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -137,7 +138,11 @@ fun HomeScreen(
                 },
                 title = {
                     Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                        TextButton(onClick = { /* already here */ }, modifier = Modifier.focusHighlight(androidx.compose.foundation.shape.CircleShape, showBorder = true)) {
+                        val homeFocus = remember { androidx.compose.ui.focus.FocusRequester() }
+                        LaunchedEffect(Unit) {
+                            runCatching { homeFocus.requestFocus() }
+                        }
+                        TextButton(onClick = { /* already here */ }, modifier = Modifier.focusRequester(homeFocus).focusHighlight(androidx.compose.foundation.shape.CircleShape, showBorder = true)) {
                             Text("HOME", color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold)
                         }
                         TextButton(onClick = onLibraryClick, modifier = Modifier.focusHighlight(androidx.compose.foundation.shape.CircleShape, showBorder = true)) {
@@ -184,8 +189,6 @@ fun HomeScreen(
             ) {
                 HomeContent(
                     data = s.data,
-                    selectedTab = vm.selectedTab,
-                    onSelectTab = vm::selectTab,
                     history = history,
                     onAnimeClick = onAnimeClick,
                     onWatchNow = onWatchNow,
@@ -238,8 +241,6 @@ private fun StartupStillLoading(
 @Composable
 private fun HomeContent(
     data: HomeData,
-    selectedTab: HomeTab,
-    onSelectTab: (HomeTab) -> Unit,
     history: List<HistoryEntry>,
     onAnimeClick: (Int) -> Unit,
     onWatchNow: (Int) -> Unit,
@@ -248,20 +249,12 @@ private fun HomeContent(
 ) {
     val device = LocalAppDeviceProfile.current
     val continueFocusRequester = remember { FocusRequester() }
-    val tabFocusRequester = remember { FocusRequester() }
     LaunchedEffect(data, history.size) {
         DiagnosticsLog.event(
-            "HomeContent rendered spotlight=${data.spotlight.size} " +
-                "history=${history.size} selectedTab=${selectedTab.name}",
+            "HomeContent rendered spotlight=${data.spotlight.size} history=${history.size}"
         )
     }
-    val columns = when {
-        device.isTv -> 5
-        device.isExpanded -> 6
-        device.isTablet -> 4
-        else -> 3
-    }
-    val catalog = data.tab(selectedTab).take(if (device.isTv) 28 else 18)
+    val firstRailFocusRequester = remember { FocusRequester() }
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(bottom = 28.dp),
@@ -276,7 +269,7 @@ private fun HomeContent(
                     if (history.isNotEmpty()) {
                         runCatching { continueFocusRequester.requestFocus() }
                     } else {
-                        runCatching { tabFocusRequester.requestFocus() }
+                        runCatching { firstRailFocusRequester.requestFocus() }
                     }
                 }
             )
@@ -284,57 +277,15 @@ private fun HomeContent(
         if (history.isNotEmpty()) {
             item { ContinueRail(history.take(12), onResume, continueFocusRequester) }
         }
-        item { HomeCatalogTabs(selectedTab, onSelectTab, tabFocusRequester) }
-        items(catalog.chunked(columns)) { row ->
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = device.pagePadding),
-                horizontalArrangement = Arrangement.spacedBy(if (device.isTv) 16.dp else 9.dp),
-            ) {
-                row.forEach { media ->
-                    AnimeCard(media, { onAnimeClick(media.id) }, Modifier.weight(1f))
-                }
-                repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
-            }
-        }
-        item { MediaRail("Trending this week", data.spotlight, onAnimeClick) }
+        item { MediaRail("Trending Now", data.spotlight, onAnimeClick, firstRailFocusRequester) }
+        item { MediaRail("Popular", data.tab(HomeTab.POPULAR), onAnimeClick) }
+        item { MediaRail("Top Rated", data.tab(HomeTab.TOP_RATED), onAnimeClick) }
+        item { MediaRail("Latest", data.tab(HomeTab.NEWEST), onAnimeClick) }
+        item { MediaRail("Movies", data.tab(HomeTab.MOVIES), onAnimeClick) }
     }
 }
 
-@Composable
-private fun HomeCatalogTabs(selected: HomeTab, onSelect: (HomeTab) -> Unit, firstTabFocusRequester: FocusRequester) {
-    val device = LocalAppDeviceProfile.current
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = device.pagePadding)
-            .clip(RectangleShape)
-            .background(MaterialTheme.colorScheme.surface)
-            .padding(4.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        HomeTab.entries.forEachIndexed { index, tab ->
-            val active = tab == selected
-            Box(
-                Modifier
-                    .weight(1f)
-                    .then(if (index == 0) Modifier.focusRequester(firstTabFocusRequester) else Modifier)
-                    .focusHighlight(RectangleShape)
-                    .clip(RectangleShape)
-                    .background(if (active) MaterialTheme.colorScheme.primary.copy(alpha = .24f) else Color.Transparent)
-                    .clickable { onSelect(tab) }
-                    .padding(vertical = 9.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    tab.label,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontWeight = FontWeight.Bold,
-                )
-            }
-        }
-    }
-}
+
 
 @Composable
 private fun HeroPager(
@@ -354,13 +305,24 @@ private fun HeroPager(
         else -> 270.dp
     }
     val cardFocusRequesters = remember(items.size) { List(items.size) { FocusRequester() } }
+    var isFocused by remember { mutableStateOf(false) }
     Box(
         Modifier
             .fillMaxWidth()
             .padding(horizontal = if (device.isTv) device.pagePadding else 0.dp)
             .height(heroHeight)
-            .clip(if (device.isTv) RectangleShape else RectangleShape),
+            .clip(if (device.isTv) RectangleShape else RectangleShape)
+            .onFocusChanged { isFocused = it.hasFocus },
     ) {
+        LaunchedEffect(isFocused) {
+            while (!isFocused) {
+                delay(5000)
+                if (items.isNotEmpty() && !pagerState.isScrollInProgress) {
+                    val next = if (pagerState.currentPage < items.lastIndex) pagerState.currentPage + 1 else 0
+                    runCatching { pagerState.animateScrollToPage(next) }
+                }
+            }
+        }
         HorizontalPager(
             state = pagerState,
             modifier = Modifier.fillMaxSize(),
@@ -470,7 +432,7 @@ private fun HeroCard(
                     modifier = Modifier.padding(top = 8.dp),
                 )
                 Text(
-                    listOfNotNull(media.seasonYear?.toString(), media.format, media.averageScore?.let { "$it% Match" }).joinToString("  •  "),
+                    listOfNotNull(media.seasonYear?.toString(), media.format).joinToString("  •  "),
                     style = MaterialTheme.typography.titleMedium,
                     color = Color.White.copy(.82f),
                     modifier = Modifier.padding(top = 5.dp, bottom = 16.dp),
@@ -504,7 +466,12 @@ private fun HeroCard(
 }
 
 @Composable
-private fun MediaRail(title: String, media: List<Media>, onAnimeClick: (Int) -> Unit) {
+private fun MediaRail(
+    title: String,
+    media: List<Media>,
+    onAnimeClick: (Int) -> Unit,
+    firstItemFocusRequester: FocusRequester? = null
+) {
     val device = LocalAppDeviceProfile.current
     Column {
         Text(
@@ -518,11 +485,12 @@ private fun MediaRail(title: String, media: List<Media>, onAnimeClick: (Int) -> 
             contentPadding = PaddingValues(horizontal = device.pagePadding, vertical = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(if (device.isTv) 18.dp else 10.dp),
         ) {
-            items(media, key = { it.id }) { item ->
+            itemsIndexed(media, key = { _, it -> it.id }) { index, item ->
                 AnimeCard(
                     media = item,
                     onClick = { onAnimeClick(item.id) },
-                    modifier = Modifier.width(device.posterWidth),
+                    modifier = Modifier.animateItem().width(device.posterWidth)
+                        .then(if (index == 0 && firstItemFocusRequester != null) Modifier.focusRequester(firstItemFocusRequester) else Modifier),
                 )
             }
         }
@@ -557,6 +525,7 @@ private fun ContinueRail(
             itemsIndexed(history, key = { _, item -> item.anilistId }) { index, entry ->
                 Column(
                     Modifier
+                        .animateItem()
                         .width(cardWidth)
                         .then(if (index == 0) Modifier.focusRequester(firstItemFocusRequester) else Modifier)
                         .focusHighlight()

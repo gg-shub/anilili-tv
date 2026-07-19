@@ -1,4 +1,4 @@
-package com.miruronative.ui.adaptive
+﻿package com.miruronative.ui.adaptive
 
 import android.content.res.Configuration
 import androidx.compose.animation.core.animateFloatAsState
@@ -93,7 +93,7 @@ fun rememberAppDeviceProfile(): AppDeviceProfile {
 @Composable
 fun Modifier.focusHighlight(
     shape: Shape = RectangleShape,
-    focusedScale: Float = if (LocalAppDeviceProfile.current.isTv) 1.015f else 1.01f,
+    focusedScale: Float = 1.0f,
     showBorder: Boolean = true
 ): Modifier {
     var focused by remember { mutableStateOf(false) }

@@ -19,10 +19,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Icon
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -89,6 +97,7 @@ import com.miruronative.data.settings.SettingsStore
 import com.miruronative.diagnostics.DiagnosticsLog
 import com.miruronative.playback.PlaybackService
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
+import com.miruronative.ui.adaptive.focusHighlight
 import com.miruronative.ui.nav.Routes
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -216,6 +225,8 @@ fun PlayerSurface(
     onNextEpisode: () -> Unit = onEnded,
     onError: (String) -> Unit,
     modifier: Modifier = Modifier,
+    onBack: (() -> Unit)? = null,
+    onCollapse: (() -> Unit)? = null,
     onToggleFullscreen: (() -> Unit)? = null,
     startPositionMs: Long = 0,
     onProgress: ((Long, Long) -> Unit)? = null,
@@ -239,6 +250,8 @@ fun PlayerSurface(
             .filterNot(StreamItem::isEmbed)
             .distinctBy(StreamItem::url)
     }
+
+
 
     DisposableEffect(controllerFuture) {
         controllerFuture.addListener(
@@ -384,6 +397,14 @@ fun PlayerSurface(
     var playerView by remember { mutableStateOf<PlayerView?>(null) }
     val mediaRouteButtonViewProvider = remember { ThemedMediaRouteButtonViewProvider() }
     var controllerVisible by remember { mutableStateOf(false) }
+
+    androidx.activity.compose.BackHandler {
+        if (controllerVisible) {
+            playerView?.hideController()
+        } else {
+            onCollapse?.invoke()
+        }
+    }
     LaunchedEffect(activeStream.url, playerView, device.isTv) {
         if (device.isTv && playerView != null) {
             delay(32)
@@ -613,6 +634,35 @@ fun PlayerSurface(
             )
         }
 
+        if (controllerVisible && onBack != null) {
+            androidx.compose.foundation.layout.Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(16.dp)
+            ) {
+                IconButton(
+                    onClick = onBack,
+                    modifier = Modifier.focusHighlight(androidx.compose.foundation.shape.CircleShape),
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back",
+                        tint = Color.White,
+                    )
+                }
+                androidx.compose.foundation.layout.Spacer(modifier = Modifier.width(16.dp))
+                androidx.compose.foundation.layout.Column {
+                    Text(seriesTitle, style = MaterialTheme.typography.titleMedium, color = Color.White, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                    Text(episodeTitle, style = MaterialTheme.typography.bodyMedium, color = Color.White.copy(alpha = 0.7f))
+                }
+            }
+        }
+
+
+
+
+
         PlaybackSettingsMenu(
             controller = controller,
             expanded = settingsExpanded,
@@ -672,12 +722,11 @@ fun PlayerSurface(
                 "Next Episode" to onNextEpisode
             else -> null
         }
-        LaunchedEffect(action?.first, playerView, device.isTv) {
-            if (device.isTv) {
-                // Compose may focus a newly inserted skip/next action before PlayerView can
-                // reclaim focus. Return remote input to the player once this frame settles.
+        val buttonFocusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
+        LaunchedEffect(action?.first, device.isTv, controllerVisible) {
+            if (device.isTv && action != null) {
                 delay(32)
-                playerView?.requestFocus()
+                runCatching { buttonFocusRequester.requestFocus() }
             }
         }
         action?.let { (label, onClick) ->
@@ -685,7 +734,7 @@ fun PlayerSurface(
                 Modifier.align(Alignment.TopCenter).padding(top = 16.dp)
             } else {
                 Modifier.align(Alignment.BottomStart).padding(start = 24.dp, bottom = 24.dp)
-            }
+            }.focusRequester(buttonFocusRequester)
             OutlinedButton(
                 onClick = onClick,
                 shape = RectangleShape,
@@ -695,7 +744,7 @@ fun PlayerSurface(
                     contentColor = Color.White,
                 ),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                modifier = actionModifier,
+                modifier = actionModifier.focusHighlight(RectangleShape),
             ) {
                 Text(
                     label.uppercase(),

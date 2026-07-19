@@ -15,8 +15,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 enum class HomeTab(val label: String) {
-    NEWEST("NEWEST"),
     POPULAR("POPULAR"),
+    NEWEST("NEWEST"),
     MOVIES("MOVIES"),
     TOP_RATED("TOP RATED"),
 }

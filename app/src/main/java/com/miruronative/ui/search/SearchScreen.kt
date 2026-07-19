@@ -41,7 +41,9 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.Text
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -54,6 +56,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -94,6 +97,7 @@ fun SearchScreen(
     val focusManager = LocalFocusManager.current
     val focusRequester = remember { FocusRequester() }
     var showFilters by remember { mutableStateOf(false) }
+    val moviesFocus = remember { androidx.compose.ui.focus.FocusRequester() }
 
     Column(modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Surface(
@@ -102,11 +106,16 @@ fun SearchScreen(
             tonalElevation = 0.dp,
         ) {
             Column(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = device.pagePadding, vertical = 12.dp),
+                Modifier.fillMaxWidth().padding(vertical = 12.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    val backDispatcher = androidx.activity.compose.LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
+                    androidx.compose.material3.IconButton(
+                        onClick = { backDispatcher?.onBackPressed() },
+                        modifier = Modifier.padding(start = 4.dp, end = 8.dp).focusHighlight(androidx.compose.foundation.shape.CircleShape)
+                    ) {
+                        androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.Default.ArrowBack, contentDescription = "Back")
+                    }
                     Column(Modifier.weight(1f)) {
                         Text("Browse", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
                         Text(
@@ -115,11 +124,11 @@ fun SearchScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    TextButton(onClick = vm::clearAll) { Text("Reset") }
+                    TextButton(onClick = vm::clearAll, modifier = Modifier.padding(end = device.pagePadding)) { Text("Reset") }
                 }
 
                 Row(
-                    Modifier.fillMaxWidth().padding(top = 10.dp),
+                    Modifier.fillMaxWidth().padding(horizontal = device.pagePadding).padding(top = 10.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -130,6 +139,7 @@ fun SearchScreen(
                             .weight(1f)
                             .widthIn(min = 0.dp, max = 720.dp)
                             .focusRequester(focusRequester)
+                            .focusProperties { down = moviesFocus }
                             // TV: the text field consumes D-pad Down for cursor handling, so
                             // focus can never escape into the results. Hand it off manually.
                             .onPreviewKeyEvent { event ->
@@ -158,6 +168,7 @@ fun SearchScreen(
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                         keyboardActions = KeyboardActions(onSearch = {
                             keyboard?.hide()
+                            vm.performSearch()
                             focusManager.moveFocus(FocusDirection.Down)
                         }),
                         colors = OutlinedTextFieldDefaults.colors(
@@ -193,6 +204,7 @@ fun SearchScreen(
                             selected = vm.filters.format == "MOVIE",
                             onClick = { vm.setFormat(if (vm.filters.format == "MOVIE") null else "MOVIE") },
                             label = { Text("Movies") },
+                            modifier = Modifier.focusRequester(moviesFocus),
                         )
                     }
                     items(options.genres.take(14), key = { it }) { genre ->
@@ -282,7 +294,7 @@ private fun ResultsGrid(results: List<Media>, filters: DiscoverFilters, onAnimeC
             }
         }
         gridItems(results, key = { it.id }) { media ->
-            AnimeCard(media, onClick = { onAnimeClick(media.id) })
+            AnimeCard(media, onClick = { onAnimeClick(media.id) }, modifier = Modifier.animateItem())
         }
     }
 }
@@ -311,6 +323,13 @@ private fun FilterSheet(
         ) {
             item {
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    val backDispatcher = androidx.activity.compose.LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
+                    androidx.compose.material3.IconButton(
+                        onClick = { backDispatcher?.onBackPressed() },
+                        modifier = Modifier.padding(end = 8.dp).focusHighlight(androidx.compose.foundation.shape.CircleShape)
+                    ) {
+                        androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.Default.ArrowBack, contentDescription = "Back")
+                    }
                     Column(Modifier.weight(1f)) {
                         Text("Filter catalog", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
                         Text(

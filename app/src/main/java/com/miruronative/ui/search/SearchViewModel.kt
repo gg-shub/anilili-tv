@@ -1,4 +1,4 @@
-package com.miruronative.ui.search
+﻿package com.miruronative.ui.search
 
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -55,7 +55,8 @@ class SearchViewModel : ViewModel() {
         submit(delayMs = 0)
     }
 
-    fun onQueryChange(value: String) = update(filters.copy(query = value), 350)
+    fun onQueryChange(value: String) { filters = filters.copy(query = value) }
+    fun performSearch() = submit(delayMs = 0)
 
     fun toggleGenre(value: String) = update(
         filters.copy(genres = filters.genres.toggle(value)),
@@ -91,6 +92,11 @@ class SearchViewModel : ViewModel() {
             if (delayMs > 0) delay(delayMs)
             if (force && _state.value is UiState.Success) _isRefreshing.value = true else _state.value = UiState.Loading
             val requestedFilters = filters
+            if (requestedFilters.query.isNotBlank() && requestedFilters.query.trim().length < 3) {
+                if (generation == requestGeneration) _state.value = UiState.Error("Search query must be at least 3 characters")
+                if (generation == requestGeneration) _isRefreshing.value = false
+                return@launch
+            }
             runCatching { repo.discover(requestedFilters, page = 1, force = force) }
                 .onSuccess { page ->
                     if (generation != requestGeneration) return@onSuccess

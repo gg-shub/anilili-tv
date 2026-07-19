@@ -10,11 +10,19 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.Modifier
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.ui.graphics.Color
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Share
@@ -25,9 +33,14 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Text
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.TextButton
-
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -39,8 +52,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.RectangleShape
+
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -58,10 +70,10 @@ import com.miruronative.diagnostics.DiagnosticsLog
 import com.miruronative.ui.UiState
 import com.miruronative.ui.adaptive.LocalAppDeviceProfile
 import com.miruronative.ui.adaptive.focusHighlight
-import com.miruronative.ui.components.CaptionAppearanceDialog
 import com.miruronative.ui.profile.AniListProfile
 import com.miruronative.ui.profile.ProfileViewModel
 import kotlinx.coroutines.launch
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
@@ -75,25 +87,22 @@ fun SettingsScreen(
     val history by LibraryStore.history.collectAsState()
     val watchlist by LibraryStore.watchlist.collectAsState()
     val autoplay by SettingsStore.autoplay.collectAsState()
+
     val autoSkip by SettingsStore.autoSkipIntroOutro.collectAsState()
     val autoSync by SettingsStore.autoSyncAniList.collectAsState()
     val preferDub by SettingsStore.preferDub.collectAsState()
     val releaseNotifications by SettingsStore.releaseNotifications.collectAsState()
     val hideAdultContent by SettingsStore.hideAdultContent.collectAsState()
     val subtitlesWithDub by SettingsStore.subtitlesWithDub.collectAsState()
+    val useExternalPlayer by SettingsStore.useExternalPlayer.collectAsState()
     val syncSavedToAniList by SettingsStore.syncSavedToAniList.collectAsState()
     val updateState by UpdateManager.state.collectAsState()
     val profile = (profileState as? UiState.Success<AniListProfile>)?.data
     val scope = rememberCoroutineScope()
     var pendingMalExport by remember { mutableStateOf<MalExportFile?>(null) }
     var malExportBusy by remember { mutableStateOf(false) }
-    var showCaptionDialog by remember { mutableStateOf(false) }
     var malExportMessage by remember { mutableStateOf<String?>(null) }
     var diagnosticsMessage by remember { mutableStateOf<String?>(null) }
-
-    if (showCaptionDialog) {
-        CaptionAppearanceDialog(onDismiss = { showCaptionDialog = false })
-    }
 
     LaunchedEffect(token) { vm.loadIfLoggedIn() }
 
@@ -170,6 +179,15 @@ fun SettingsScreen(
         topBar = {
             TopAppBar(
                 title = { Text("Settings", fontWeight = FontWeight.Black) },
+                navigationIcon = {
+                    val backDispatcher = androidx.activity.compose.LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
+                    androidx.compose.material3.IconButton(
+                        onClick = { backDispatcher?.onBackPressed() },
+                        modifier = Modifier.focusHighlight(androidx.compose.foundation.shape.CircleShape)
+                    ) {
+                        androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.Default.ArrowBack, contentDescription = "Back")
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
             )
         },
@@ -195,14 +213,12 @@ fun SettingsScreen(
                     SettingsStore::setSubtitlesWithDub,
                 )
             }
-            item { SectionDivider() }
-
-            item { SettingsSectionTitle("Subtitles") }
             item {
-                SettingClickable(
-                    "Caption appearance",
-                    "Adjust text size, color, and background",
-                    onClick = { showCaptionDialog = true }
+                SettingSwitch(
+                    "Use external player",
+                    "Play videos in an external app like VLC or MX Player",
+                    useExternalPlayer,
+                    SettingsStore::setUseExternalPlayer,
                 )
             }
             item { SectionDivider() }
@@ -242,6 +258,7 @@ fun SettingsScreen(
             item { SectionDivider() }
 
             item { SettingsSectionTitle("Data") }
+
             item {
                 SettingsAction(
                     title = if (malExportBusy) "Preparing MyAnimeList export..." else "Export MyAnimeList XML",
@@ -272,26 +289,60 @@ fun SettingsScreen(
 
             item { SettingsSectionTitle("App") }
             item {
+                var showAboutMenu by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
                 SettingsAction(
-                    title = "Share diagnostics",
-                    icon = { Icon(Icons.Default.Share, contentDescription = null) },
+                    title = "About",
+                    icon = { Icon(Icons.Default.Info, contentDescription = null) },
                     enabled = true,
-                    onClick = {
-                        diagnosticsMessage = null
-                        DiagnosticsLog.share(context)
-                            .onFailure { diagnosticsMessage = it.message ?: "Couldn't share diagnostics" }
-                    },
+                    onClick = { showAboutMenu = true },
                 )
-            }
-            diagnosticsMessage?.let { message ->
-                item {
-                    Text(
-                        message,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                if (showAboutMenu) {
+                    androidx.compose.material3.AlertDialog(
+                        onDismissRequest = { showAboutMenu = false },
+                        shape = androidx.compose.ui.graphics.RectangleShape,
+                        containerColor = MaterialTheme.colorScheme.surface,
+                        titleContentColor = MaterialTheme.colorScheme.onSurface,
+                        textContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        title = { Text("About", fontWeight = FontWeight.Bold) },
+                        text = {
+                            androidx.compose.foundation.layout.Column {
+                                androidx.compose.material3.TextButton(
+                                    onClick = {
+                                        showAboutMenu = false
+                                        runCatching {
+                                            context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://github.com/gg-shub/anilili-tv")).apply {
+                                                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                            })
+                                        }
+                                    },
+                                    shape = androidx.compose.ui.graphics.RectangleShape,
+                                    modifier = Modifier.fillMaxWidth().focusHighlight(androidx.compose.ui.graphics.RectangleShape),
+                                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)
+                                ) {
+                                    Icon(androidx.compose.material.icons.Icons.Default.Info, contentDescription = "GitHub", modifier = Modifier.size(24.dp), tint = MaterialTheme.colorScheme.onSurface)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("GitHub: gg-shub/anilili-tv", color = MaterialTheme.colorScheme.onSurface)
+                                    Spacer(Modifier.weight(1f))
+                                }
+                            }
+                        },
+                        confirmButton = {
+                            TextButton(
+                                onClick = { showAboutMenu = false },
+                                shape = androidx.compose.ui.graphics.RectangleShape,
+                                modifier = Modifier.focusHighlight(androidx.compose.ui.graphics.RectangleShape)
+                            ) { Text("Close") }
+                        }
                     )
                 }
+            }
+            item {
+                Text(
+                    "Version ${UpdateManager.currentVersion}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                )
             }
         }
     }
@@ -308,27 +359,6 @@ private fun SettingsSectionTitle(title: String) {
 }
 
 @Composable
-private fun SettingClickable(
-    title: String,
-    description: String,
-    onClick: () -> Unit,
-) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .focusHighlight(RectangleShape)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-            Text(description, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
-}
-
-@Composable
 private fun SettingSwitch(
     title: String,
     description: String,
@@ -338,7 +368,7 @@ private fun SettingSwitch(
     Row(
         Modifier
             .fillMaxWidth()
-            .focusHighlight(RectangleShape)
+            .focusHighlight(RoundedCornerShape(8.dp))
             .clickable { onCheckedChange(!checked) }
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -361,7 +391,7 @@ private fun SettingsAction(
     TextButton(
         onClick = onClick,
         enabled = enabled,
-        modifier = Modifier.fillMaxWidth().focusHighlight(RectangleShape),
+        modifier = Modifier.fillMaxWidth().focusHighlight(RoundedCornerShape(8.dp)),
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
     ) {
         icon()
@@ -375,32 +405,4 @@ private fun SectionDivider() {
         modifier = Modifier.padding(top = 10.dp),
         color = MaterialTheme.colorScheme.outline.copy(alpha = .7f),
     )
-}
-
-@Composable
-private fun SettingSlider(
-    title: String,
-    description: String,
-    value: Float,
-    range: ClosedFloatingPointRange<Float>,
-    onValueChange: (Float) -> Unit,
-) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .focusHighlight(RectangleShape)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-            Text(description, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        androidx.compose.material3.Slider(
-            value = value,
-            onValueChange = onValueChange,
-            valueRange = range,
-            modifier = Modifier.weight(1f)
-        )
-    }
 }

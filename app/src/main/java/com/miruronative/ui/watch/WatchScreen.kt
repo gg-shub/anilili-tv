@@ -1,9 +1,11 @@
-package com.miruronative.ui.watch
+﻿package com.miruronative.ui.watch
 
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.Intent
 import android.content.pm.ActivityInfo
+import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -22,6 +24,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
@@ -35,7 +38,6 @@ import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material3.Button
 import androidx.compose.material3.IconButton
@@ -71,6 +73,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.miruronative.data.ProviderCatalog
 import com.miruronative.data.model.EpisodeItem
 import com.miruronative.data.model.StreamItem
+import com.miruronative.data.settings.SettingsStore
 import com.miruronative.diagnostics.DiagnosticsLog
 import com.miruronative.playback.PlaybackService
 import com.miruronative.ui.UiState
@@ -102,17 +105,10 @@ fun WatchScreen(
     var fullscreen by remember { mutableStateOf(device.isTv) }
     val activity = remember(context) { context.findActivity() }
     val currentOnBack by rememberUpdatedState(onBack)
-    var backPressedTime by remember { mutableLongStateOf(0L) }
     val pauseAndBack = remember {
         {
-            val currentTime = System.currentTimeMillis()
-            if (currentTime - backPressedTime < 2000) {
-                PlaybackService.pauseActivePlayback()
-                currentOnBack()
-            } else {
-                backPressedTime = currentTime
-                android.widget.Toast.makeText(context, "Press back again to exit", android.widget.Toast.LENGTH_SHORT).show()
-            }
+            PlaybackService.pauseActivePlayback()
+            currentOnBack()
         }
     }
 
@@ -224,23 +220,36 @@ fun WatchScreen(
                 ) { Text("Open in web player") }
                 BackButton(pauseAndBack, Modifier.align(Alignment.Start))
             }
-            is UiState.Success -> WatchContent(
-                data = s.data,
-                fullscreen = fullscreen || inPictureInPicture,
-                onBack = pauseAndBack,
-                onPrev = vm::prev,
-                onNext = vm::next,
-                onChangeSource = vm::changeSource,
-                onSelectEpisode = { index ->
-                    if (device.isTv) fullscreen = true
-                    vm.playIndex(index)
-                },
-                onWebFallback = { webFallback = true },
-                onToggleFullscreen = { fullscreen = !fullscreen },
-                onFullscreenChanged = { fullscreen = it },
-                onProgress = vm::onProgress,
-                onPlaybackError = vm::onPlaybackError,
-            )
+            is UiState.Success -> {
+                val useExternalPlayer by SettingsStore.useExternalPlayer.collectAsState()
+                val externalStream = s.data.chosenStream?.takeIf { !it.isEmbed && useExternalPlayer }
+                LaunchedEffect(externalStream?.url, useExternalPlayer) {
+                    if (externalStream != null) {
+                        val intent = Intent(Intent.ACTION_VIEW).apply {
+                            setDataAndType(Uri.parse(externalStream.url), "video/*")
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        runCatching { context.startActivity(intent) }
+                    }
+                }
+                WatchContent(
+                    data = s.data,
+                    fullscreen = fullscreen || inPictureInPicture,
+                    onBack = pauseAndBack,
+                    onPrev = vm::prev,
+                    onNext = vm::next,
+                    onChangeSource = vm::changeSource,
+                    onSelectEpisode = { index ->
+                        if (device.isTv) fullscreen = true
+                        vm.playIndex(index)
+                    },
+                    onWebFallback = { webFallback = true },
+                    onToggleFullscreen = { fullscreen = !fullscreen },
+                    onFullscreenChanged = { fullscreen = it },
+                    onProgress = vm::onProgress,
+                    onPlaybackError = vm::onPlaybackError,
+                )
+            }
         }
     }
 }
@@ -260,6 +269,15 @@ private fun WatchContent(
     onProgress: (Long, Long) -> Unit,
     onPlaybackError: (String) -> Unit,
 ) {
+    var showCloseDialog by remember { mutableStateOf(false) }
+    val handleCollapse = {
+        if (fullscreen) {
+            onToggleFullscreen()
+        } else {
+            showCloseDialog = true
+        }
+    }
+    
     val device = LocalAppDeviceProfile.current
     val configuration = LocalConfiguration.current
     val listFocus = remember { FocusRequester() }
@@ -348,6 +366,8 @@ private fun WatchContent(
                         onNextEpisode = onNext,
                         onError = onPlaybackError,
                         modifier = Modifier.fillMaxSize(),
+                        onBack = onBack,
+                        onCollapse = handleCollapse,
                         onToggleFullscreen = onToggleFullscreen,
                         startPositionMs = data.startPositionMs,
                         onProgress = onProgress,
@@ -366,12 +386,67 @@ private fun WatchContent(
                 }
             }
             if (!fullscreen) BackButton(onBack, Modifier.align(Alignment.TopStart))
+            
+            if (showCloseDialog) {
+                val focusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
+                LaunchedEffect(Unit) {
+                    runCatching { focusRequester.requestFocus() }
+                }
+                androidx.compose.ui.window.Dialog(onDismissRequest = { showCloseDialog = false }) {
+                    androidx.compose.foundation.layout.Box(
+                        modifier = Modifier
+                            .background(Color.Black.copy(alpha = 0.85f), androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+                            .padding(24.dp)
+                    ) {
+                        androidx.compose.foundation.layout.Column(
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                "Do you wish to close the player?",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = Color.White
+                            )
+                            androidx.compose.foundation.layout.Spacer(Modifier.height(24.dp))
+                            androidx.compose.foundation.layout.Row(
+                                horizontalArrangement = Arrangement.spacedBy(16.dp)
+                            ) {
+                                androidx.compose.material3.OutlinedButton(
+                                    onClick = {
+                                        showCloseDialog = false
+                                        onBack()
+                                    },
+                                    shape = androidx.compose.foundation.shape.CircleShape,
+                                    modifier = Modifier.focusRequester(focusRequester).focusHighlight(androidx.compose.foundation.shape.CircleShape)
+                                ) {
+                                    Text("Yes", color = Color.White)
+                                }
+                                androidx.compose.material3.OutlinedButton(
+                                    onClick = { showCloseDialog = false },
+                                    shape = androidx.compose.foundation.shape.CircleShape,
+                                    modifier = Modifier.focusHighlight(androidx.compose.foundation.shape.CircleShape)
+                                ) {
+                                    Text("No", color = Color.White)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         if (fullscreen) return
 
-        val episodeRows = remember(data.episodes, device.episodeColumns) {
-            data.episodes.withIndex().chunked(device.episodeColumns)
+        val chunkSize = 50
+        val episodeChunks = remember(data.episodes) { data.episodes.withIndex().chunked(chunkSize) }
+        var selectedRangeIndex by remember(data.episodes, data.currentIndex) {
+            androidx.compose.runtime.mutableIntStateOf(if (chunkSize > 0) data.currentIndex / chunkSize else 0)
+        }
+        if (selectedRangeIndex >= episodeChunks.size && episodeChunks.isNotEmpty()) {
+            selectedRangeIndex = episodeChunks.size - 1
+        }
+        val currentEpisodes = episodeChunks.getOrNull(selectedRangeIndex).orEmpty()
+        val episodeRows = remember(currentEpisodes, device.episodeColumns) {
+            currentEpisodes.chunked(device.episodeColumns)
         }
         LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
             item {
@@ -402,6 +477,15 @@ private fun WatchContent(
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
+                    androidx.compose.material3.OutlinedButton(
+                        onClick = { onFullscreenChanged(true) },
+                        shape = androidx.compose.foundation.shape.CircleShape,
+                        modifier = Modifier.focusHighlight(androidx.compose.foundation.shape.CircleShape)
+                    ) {
+                        Icon(Icons.Default.Fullscreen, contentDescription = null, tint = Color.White)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Full Screen", color = Color.White)
+                    }
                 }
                 SourceSelectors(
                     data = data,
@@ -419,6 +503,33 @@ private fun WatchContent(
                             bottom = 6.dp,
                         ),
                     )
+                }
+                
+                if (episodeChunks.size > 1) {
+                    androidx.compose.foundation.lazy.LazyRow(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = device.pagePadding, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(episodeChunks.size) { index ->
+                            val chunk = episodeChunks[index]
+                            val isSelected = index == selectedRangeIndex
+                            val label = if (chunk.size == 1) chunk.first().value.displayNumber else "${chunk.first().value.displayNumber}-${chunk.last().value.displayNumber}"
+                            Box(
+                                Modifier
+                                    .clip(androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                                    .background(if (isSelected) Color.White.copy(alpha = 0.2f) else Color.Transparent)
+                                    .clickable { selectedRangeIndex = index }
+                                    .focusHighlight(androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                            ) {
+                                Text(
+                                    label,
+                                    color = Color.White,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                )
+                            }
+                        }
+                    }
                 }
             }
             items(episodeRows) { row ->

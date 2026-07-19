@@ -27,6 +27,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -48,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.core.content.ContextCompat
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.outlined.NotificationsNone
 import coil.compose.AsyncImage
@@ -73,6 +75,7 @@ private val dateFmt = DateTimeFormatter.ofPattern("EEEE, MMM d")
 @Composable
 fun ScheduleScreen(
     onAnimeClick: (Int) -> Unit,
+    onBack: () -> Unit,
     modifier: Modifier = Modifier,
     vm: ScheduleViewModel = viewModel(),
 ) {
@@ -102,6 +105,14 @@ fun ScheduleScreen(
         topBar = {
             TopAppBar(
                 title = { Text("Schedule") },
+                navigationIcon = {
+                    IconButton(
+                        onClick = onBack,
+                        modifier = Modifier.focusHighlight(androidx.compose.foundation.shape.CircleShape)
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.background,
                 ),

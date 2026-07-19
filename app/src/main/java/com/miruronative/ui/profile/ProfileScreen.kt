@@ -19,6 +19,17 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.ui.focus.FocusRequester
+import android.content.Intent
+import android.net.Uri
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExpandMore
@@ -35,7 +46,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.Text
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -153,7 +166,10 @@ fun ProfileScreen(
 
     if (showLogin) {
         LoginWebView(
-            onToken = { showLogin = false; vm.onLoggedIn(it) },
+            authorizeUrl = remember { AuthManager.authorizeUrl() },
+            isRedirect = AuthManager::isRedirect,
+            extractResult = AuthManager::extractToken,
+            onResult = { showLogin = false; vm.onLoggedIn(it) },
             onCancel = { showLogin = false },
         )
         return
@@ -183,6 +199,15 @@ fun ProfileScreen(
         topBar = {
             TopAppBar(
                 title = { Text("Library", fontWeight = FontWeight.Black) },
+                navigationIcon = {
+                    val backDispatcher = androidx.activity.compose.LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
+                    androidx.compose.material3.IconButton(
+                        onClick = { backDispatcher?.onBackPressed() },
+                        modifier = Modifier.focusHighlight(androidx.compose.foundation.shape.CircleShape)
+                    ) {
+                        androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.Default.ArrowBack, contentDescription = "Back")
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
             )
         },
@@ -235,7 +260,7 @@ fun ProfileScreen(
                 item {
                     EmptyPanel(
                         if (selectedView == LibraryView.WATCHLIST && selectedFormat == null && selectedAiring == null) {
-                            "Tap the heart on any anime to save it"
+                            "Click Add to List + on any show to add them to your watchlist"
                         } else {
                             "No anime match these filters"
                         },
@@ -302,7 +327,7 @@ private fun ProfileHero(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 5.dp),
                 )
-                Button(onClick = onLogin, modifier = Modifier.padding(top = 16.dp).focusHighlight(RectangleShape)) {
+                Button(onClick = onLogin, modifier = Modifier.padding(top = 16.dp).focusHighlight(CircleShape)) {
                     Text("Login with AniList", fontWeight = FontWeight.Bold)
                 }
             }
@@ -451,13 +476,13 @@ private fun SelectorField(
     var expanded by remember { mutableStateOf(false) }
     Box(modifier) {
         Surface(
-            modifier = Modifier.fillMaxWidth().focusHighlight(RectangleShape).clickable { expanded = true },
-            shape = RectangleShape,
+            modifier = Modifier.fillMaxWidth().focusHighlight(RoundedCornerShape(8.dp)).clickable { expanded = true },
+            shape = RoundedCornerShape(8.dp),
             color = MaterialTheme.colorScheme.background,
             border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
         ) {
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 12.dp),
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(value, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -680,5 +705,6 @@ private fun Modifier.tvEscapeDown(target: androidx.compose.ui.focus.FocusRequest
         } else {
             false
         }
+        }
     }
-}
+

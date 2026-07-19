@@ -1,4 +1,4 @@
-package com.miruronative.ui.components
+﻿package com.miruronative.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Icon
@@ -21,7 +22,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -56,7 +56,7 @@ fun AnimeCard(
             Modifier
                 .fillMaxWidth()
                 .aspectRatio(2f / 3f)
-                .clip(RectangleShape)
+                .clip(RoundedCornerShape(8.dp))
                 .background(MaterialTheme.colorScheme.surfaceVariant),
         ) {
             AsyncImage(
@@ -100,7 +100,7 @@ private fun AdultBadge(modifier: Modifier = Modifier) {
     Text(
         "18+",
         modifier = modifier
-            .clip(RectangleShape)
+            .clip(RoundedCornerShape(5.dp))
             .background(MaterialTheme.colorScheme.error)
             .padding(horizontal = 6.dp, vertical = 3.dp),
         style = MaterialTheme.typography.labelSmall,
@@ -114,9 +114,9 @@ private fun AdultBadge(modifier: Modifier = Modifier) {
 fun RatingBadge(score: Int, modifier: Modifier = Modifier) {
     Row(
         modifier
-            .clip(RectangleShape)
+            .clip(RoundedCornerShape(6.dp))
             .background(Color.Black.copy(alpha = .78f))
-            .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = .6f), RectangleShape)
+            .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = .6f), RoundedCornerShape(6.dp))
             .padding(horizontal = 5.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -136,4 +136,3 @@ fun RatingBadge(score: Int, modifier: Modifier = Modifier) {
 }
 
 val GridContentPadding = PaddingValues(16.dp)
-
