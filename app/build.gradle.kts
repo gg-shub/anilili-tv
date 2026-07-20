@@ -1,5 +1,3 @@
-import java.util.Properties
-
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -7,6 +5,8 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
 }
+
+import java.util.Properties
 
 val keystoreProperties = Properties().apply {
     val file = rootProject.file("keystore.properties")
@@ -22,8 +22,8 @@ android {
         applicationId = "com.miruronative"
         minSdk = 26
         targetSdk = 36
-        versionCode = 10
-        versionName = "0.1.9"
+        versionCode = 18
+        versionName = "1.0.5"
     }
 
     signingConfigs {
@@ -46,7 +46,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             signingConfig = signingConfigs.getByName("release")
-            manifestPlaceholders["usesCleartextTraffic"] = "false"
+            manifestPlaceholders["usesCleartextTraffic"] = "true"
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
@@ -97,13 +97,19 @@ dependencies {
     implementation(libs.androidx.media3.ui)
     implementation(libs.androidx.media3.session)
     implementation(libs.androidx.media3.datasource)
+    implementation(libs.androidx.media3.datasource.cronet)
     implementation(libs.androidx.media3.database)
     implementation(libs.androidx.media3.cast)
+    implementation(libs.play.services.cronet)
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.fragment.ktx)
 
+    implementation("com.google.zxing:core:3.4.1")
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
+
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.coil.compose)
     implementation(libs.androidx.room.runtime)
