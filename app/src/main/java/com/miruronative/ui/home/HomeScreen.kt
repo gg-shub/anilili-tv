@@ -539,8 +539,12 @@ private fun ContinueRail(
                             Box(Modifier.fillMaxWidth(entry.progressFraction.coerceAtLeast(.03f)).height(4.dp).background(MaterialTheme.colorScheme.primary))
                         }
                     }
+                    val isFinished = entry.progressFraction > 0.85f
+                    val displayEp = if (isFinished) (entry.episodeNumber + 1.0) else entry.episodeNumber
+                    val displayStr = if (displayEp % 1.0 == 0.0) displayEp.toInt().toString() else displayEp.toString()
+                    val label = if (isFinished) "Play Episode $displayStr" else "Resume Episode $displayStr"
                     Text(entry.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 6.dp))
-                    Text("Episode ${entry.episodeLabel}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }

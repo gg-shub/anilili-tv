@@ -31,8 +31,19 @@ fun UpdatePromptHost() {
     val state by UpdateManager.state.collectAsState()
 
     when (val s = state) {
+        is UpdateManager.State.UpToDate -> {
+            androidx.compose.runtime.LaunchedEffect(Unit) {
+                android.widget.Toast.makeText(context, "No updates available", android.widget.Toast.LENGTH_SHORT).show()
+                UpdateManager.dismiss()
+            }
+        }
+
         is UpdateManager.State.Available -> AlertDialog(
             onDismissRequest = UpdateManager::dismiss,
+            shape = RectangleShape,
+            containerColor = MaterialTheme.colorScheme.surface,
+            titleContentColor = MaterialTheme.colorScheme.onSurface,
+            textContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
             title = { Text("Update available", fontWeight = FontWeight.Black) },
             text = {
                 Column(
@@ -56,15 +67,19 @@ fun UpdatePromptHost() {
                 }
             },
             confirmButton = {
-                TextButton(onClick = { UpdateManager.download(context) }) { Text("Update") }
+                TextButton(onClick = { UpdateManager.download(context) }, shape = RectangleShape) { Text("Download") }
             },
             dismissButton = {
-                TextButton(onClick = UpdateManager::dismiss) { Text("Not now") }
+                TextButton(onClick = UpdateManager::dismiss, shape = RectangleShape) { Text("Cancel") }
             },
         )
 
         is UpdateManager.State.Downloading -> AlertDialog(
             onDismissRequest = {},
+            shape = RectangleShape,
+            containerColor = MaterialTheme.colorScheme.surface,
+            titleContentColor = MaterialTheme.colorScheme.onSurface,
+            textContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
             title = { Text("Downloading update", fontWeight = FontWeight.Black) },
             text = {
                 Column {
@@ -85,6 +100,10 @@ fun UpdatePromptHost() {
 
         is UpdateManager.State.ReadyToInstall -> AlertDialog(
             onDismissRequest = UpdateManager::dismiss,
+            shape = RectangleShape,
+            containerColor = MaterialTheme.colorScheme.surface,
+            titleContentColor = MaterialTheme.colorScheme.onSurface,
+            textContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
             title = { Text("Ready to install", fontWeight = FontWeight.Black) },
             text = {
                 Text(
@@ -94,19 +113,23 @@ fun UpdatePromptHost() {
                 )
             },
             confirmButton = {
-                TextButton(onClick = { UpdateManager.install(context) }) { Text("Install") }
+                TextButton(onClick = { UpdateManager.install(context) }, shape = RectangleShape) { Text("Install") }
             },
             dismissButton = {
-                TextButton(onClick = UpdateManager::dismiss) { Text("Later") }
+                TextButton(onClick = UpdateManager::dismiss, shape = RectangleShape) { Text("Later") }
             },
         )
 
         is UpdateManager.State.Failed -> AlertDialog(
             onDismissRequest = UpdateManager::dismiss,
+            shape = RectangleShape,
+            containerColor = MaterialTheme.colorScheme.surface,
+            titleContentColor = MaterialTheme.colorScheme.onSurface,
+            textContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
             title = { Text("Update failed", fontWeight = FontWeight.Black) },
             text = { Text(s.message, style = MaterialTheme.typography.bodyMedium) },
             confirmButton = {
-                TextButton(onClick = UpdateManager::dismiss) { Text("Close") }
+                TextButton(onClick = UpdateManager::dismiss, shape = RectangleShape) { Text("Close") }
             },
         )
 

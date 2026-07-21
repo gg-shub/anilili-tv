@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -382,18 +383,6 @@ fun PlayerSurface(
         DiagnosticsLog.event("PlayerSurface prepare called playWhenReady=true")
     }
 
-    var positionMs by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(controller) {
-        val activeController = controller ?: return@LaunchedEffect
-        while (isActive) {
-            positionMs = activeController.currentPosition.coerceAtLeast(0)
-            if (activeController.isPlaying) {
-                onProgress?.invoke(positionMs, activeController.duration.coerceAtLeast(0))
-            }
-            delay(500)
-        }
-    }
-
     var playerView by remember { mutableStateOf<PlayerView?>(null) }
     val mediaRouteButtonViewProvider = remember { ThemedMediaRouteButtonViewProvider() }
     var controllerVisible by remember { mutableStateOf(false) }
@@ -467,32 +456,38 @@ fun PlayerSurface(
         }
     }
 
+    val positionMsState = remember { mutableLongStateOf(0L) }
     LaunchedEffect(
         autoSkipIntroOutro,
         autoplay,
         controller,
-        positionMs,
         introStartMs,
         introEndMs,
         outroStartMs,
         outroEndMs,
     ) {
         val activeController = controller ?: return@LaunchedEffect
-        if (!autoSkipIntroOutro || !activeController.isPlaying) return@LaunchedEffect
-
-        if (!introAutoSkipped && isInSkipWindow(positionMs, introStartMs, introEndMs)) {
-            introAutoSkipped = true
-            activeController.seekTo(introEndMs ?: return@LaunchedEffect)
-            return@LaunchedEffect
-        }
-
-        if (
-            autoplay &&
-            !outroAutoHandled &&
-            isInSkipWindow(positionMs, outroStartMs, outroEndMs)
-        ) {
-            outroAutoHandled = true
-            onNextEpisode()
+        while (isActive) {
+            val pos = activeController.currentPosition.coerceAtLeast(0)
+            positionMsState.longValue = pos
+            if (activeController.isPlaying) {
+                onProgress?.invoke(pos, activeController.duration.coerceAtLeast(0))
+            }
+            
+            if (autoSkipIntroOutro && activeController.isPlaying) {
+                if (!introAutoSkipped && isInSkipWindow(pos, introStartMs, introEndMs)) {
+                    introAutoSkipped = true
+                    activeController.seekTo(introEndMs ?: return@LaunchedEffect)
+                } else if (
+                    autoplay &&
+                    !outroAutoHandled &&
+                    isInSkipWindow(pos, outroStartMs, outroEndMs)
+                ) {
+                    outroAutoHandled = true
+                    onNextEpisode()
+                }
+            }
+            delay(500)
         }
     }
 
@@ -715,43 +710,73 @@ fun PlayerSurface(
             CircularProgressIndicator(Modifier.align(Alignment.Center))
         }
 
-        val action: Pair<String, () -> Unit>? = when {
-            introEndMs != null && positionMs in introStartMs..introEndMs ->
-                "Skip Intro" to { controller?.seekTo(introEndMs); Unit }
-            outroStartMs != null && outroEndMs != null && positionMs in outroStartMs..outroEndMs ->
-                "Next Episode" to onNextEpisode
-            else -> null
-        }
-        val buttonFocusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
-        LaunchedEffect(action?.first, device.isTv, controllerVisible) {
-            if (device.isTv && action != null) {
-                delay(32)
-                runCatching { buttonFocusRequester.requestFocus() }
+        SkipActionOverlay(
+            positionProvider = { positionMsState.longValue },
+            introStartMs = introStartMs,
+            introEndMs = introEndMs,
+            outroStartMs = outroStartMs,
+            outroEndMs = outroEndMs,
+            controllerVisible = controllerVisible,
+            deviceIsTv = device.isTv,
+            onSkipIntro = { controller?.seekTo(introEndMs ?: return@SkipActionOverlay) },
+            onNextEpisode = onNextEpisode
+        )
+    }
+}
+
+@Composable
+private fun androidx.compose.foundation.layout.BoxScope.SkipActionOverlay(
+    positionProvider: () -> Long,
+    introStartMs: Long,
+    introEndMs: Long?,
+    outroStartMs: Long?,
+    outroEndMs: Long?,
+    controllerVisible: Boolean,
+    deviceIsTv: Boolean,
+    onSkipIntro: () -> Unit,
+    onNextEpisode: () -> Unit
+) {
+    val action by remember(introStartMs, introEndMs, outroStartMs, outroEndMs) {
+        androidx.compose.runtime.derivedStateOf {
+            val positionMs = positionProvider()
+            when {
+                introEndMs != null && positionMs in introStartMs..introEndMs ->
+                    "Skip Intro" to onSkipIntro
+                outroStartMs != null && outroEndMs != null && positionMs in outroStartMs..outroEndMs ->
+                    "Next Episode" to onNextEpisode
+                else -> null
             }
         }
-        action?.let { (label, onClick) ->
-            val actionModifier = if (controllerVisible) {
-                Modifier.align(Alignment.TopCenter).padding(top = 16.dp)
-            } else {
-                Modifier.align(Alignment.BottomStart).padding(start = 24.dp, bottom = 24.dp)
-            }.focusRequester(buttonFocusRequester)
-            OutlinedButton(
-                onClick = onClick,
-                shape = RectangleShape,
-                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.55f)),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    containerColor = Color.Black.copy(alpha = 0.5f),
-                    contentColor = Color.White,
-                ),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                modifier = actionModifier.focusHighlight(RectangleShape),
-            ) {
-                Text(
-                    label.uppercase(),
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Bold,
-                )
-            }
+    }
+    val buttonFocusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
+    LaunchedEffect(action?.first, deviceIsTv, controllerVisible) {
+        if (deviceIsTv && action != null) {
+            delay(32)
+            runCatching { buttonFocusRequester.requestFocus() }
+        }
+    }
+    action?.let { (label, onClick) ->
+        val actionModifier = if (controllerVisible) {
+            Modifier.align(Alignment.TopCenter).padding(top = 16.dp)
+        } else {
+            Modifier.align(Alignment.BottomStart).padding(start = 24.dp, bottom = 24.dp)
+        }.focusRequester(buttonFocusRequester)
+        OutlinedButton(
+            onClick = onClick,
+            shape = RectangleShape,
+            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.55f)),
+            colors = ButtonDefaults.outlinedButtonColors(
+                containerColor = Color.Black.copy(alpha = 0.5f),
+                contentColor = Color.White,
+            ),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+            modifier = actionModifier.focusHighlight(RectangleShape),
+        ) {
+            Text(
+                label.uppercase(),
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold,
+            )
         }
     }
 }
@@ -777,9 +802,18 @@ private fun PlaybackSettingsMenu(
     // where this menu is the only way to pick quality, subtitles, and audio tracks.
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss,
+        shape = androidx.compose.ui.graphics.RectangleShape,
+        containerColor = androidx.compose.ui.graphics.Color.Black,
+        titleContentColor = androidx.compose.ui.graphics.Color.White,
+        textContentColor = androidx.compose.ui.graphics.Color.White,
+        modifier = Modifier.border(1.dp, androidx.compose.ui.graphics.Color.White, androidx.compose.ui.graphics.RectangleShape),
         title = { Text("Playback settings") },
         confirmButton = {
-            androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Close") }
+            androidx.compose.material3.TextButton(
+                onClick = onDismiss,
+                shape = androidx.compose.ui.graphics.RectangleShape,
+                modifier = Modifier.focusHighlight(androidx.compose.ui.graphics.RectangleShape)
+            ) { Text("Close", color = androidx.compose.ui.graphics.Color.White) }
         },
         text = {
             Column(

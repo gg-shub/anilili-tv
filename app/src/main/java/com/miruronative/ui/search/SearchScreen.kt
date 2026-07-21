@@ -11,7 +11,11 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.border
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -137,7 +141,6 @@ fun SearchScreen(
                         onValueChange = vm::onQueryChange,
                         modifier = Modifier
                             .weight(1f)
-                            .widthIn(min = 0.dp, max = 720.dp)
                             .focusRequester(focusRequester)
                             .focusProperties { down = moviesFocus }
                             // TV: the text field consumes D-pad Down for cursor handling, so
@@ -189,15 +192,11 @@ fun SearchScreen(
                     }
                 }
 
-                Text(
-                    "Categories",
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(top = 14.dp, bottom = 2.dp),
-                )
+
                 LazyRow(
                     modifier = Modifier.fillMaxWidth().focusGroup(),
-                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                    horizontalArrangement = Arrangement.spacedBy(7.dp, Alignment.CenterHorizontally),
+                    contentPadding = PaddingValues(horizontal = device.pagePadding),
                 ) {
                     item(key = "format-movie") {
                         FilterChip(
@@ -217,7 +216,7 @@ fun SearchScreen(
                 }
             }
         }
-        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .7f))
+    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .7f))
         Box(Modifier.fillMaxWidth().weight(1f)) {
             when (val current = state) {
                 is UiState.Loading -> LoadingBox()
@@ -313,117 +312,134 @@ private fun FilterSheet(
             .filter { tagSearch.isBlank() || it.name.contains(tagSearch, ignoreCase = true) }
             .take(36)
     }
-    ModalBottomSheet(
+    androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = MaterialTheme.colorScheme.surface,
-    ) {
-        LazyColumn(
-            contentPadding = PaddingValues(start = 18.dp, end = 18.dp, bottom = 36.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            item {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    val backDispatcher = androidx.activity.compose.LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
-                    androidx.compose.material3.IconButton(
-                        onClick = { backDispatcher?.onBackPressed() },
-                        modifier = Modifier.padding(end = 8.dp).focusHighlight(androidx.compose.foundation.shape.CircleShape)
-                    ) {
-                        androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.Default.ArrowBack, contentDescription = "Back")
-                    }
-                    Column(Modifier.weight(1f)) {
-                        Text("Filter catalog", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
-                        Text(
-                            "Combine filters to narrow the full AniList catalog.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    TextButton(onClick = vm::clearFilters) { Text("Clear") }
-                }
-            }
-            item { FilterSection("Sort by") { ChoiceFlow(SearchViewModel.SORTS, filters.sort, vm::setSort) } }
-            item {
-                FilterSection("Release year") {
-                    OutlinedTextField(
-                        value = filters.year?.toString().orEmpty(),
-                        onValueChange = { value ->
-                            val digits = value.filter(Char::isDigit).take(4)
-                            vm.setYear(digits.toIntOrNull()?.takeIf { it in 1900..2100 })
-                        },
-                        modifier = Modifier.fillMaxWidth().tvEscapeDown(),
-                        placeholder = { Text("Any year (for example 2024)") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        singleLine = true,
-                        shape = RectangleShape,
+        shape = RectangleShape,
+        containerColor = Color.Black,
+        titleContentColor = Color.White,
+        textContentColor = Color.White,
+        modifier = Modifier.border(1.dp, Color.White, RectangleShape).fillMaxWidth(0.9f),
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Filter catalog", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+                    Text(
+                        "Combine filters to narrow the full AniList catalog.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.Gray,
                     )
                 }
+                TextButton(
+                    onClick = vm::clearFilters,
+                    shape = RectangleShape,
+                    modifier = Modifier.focusHighlight(RectangleShape)
+                ) { Text("Clear", color = Color.White) }
             }
-            item { FilterSection("Status") { NullableChoiceFlow(SearchViewModel.STATUSES, filters.status, vm::setStatus) } }
-            item { FilterSection("Format") { NullableChoiceFlow(SearchViewModel.FORMATS, filters.format, vm::setFormat) } }
-            item {
-                FilterSection("Minimum rating") {
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(selected = filters.minimumScore == null, onClick = { vm.setMinimumScore(null) }, label = { Text("Any") })
-                        SearchViewModel.RATINGS.forEach { rating ->
-                            FilterChip(
-                                selected = filters.minimumScore == rating,
-                                onClick = { vm.setMinimumScore(rating) },
-                                label = { Text("$rating%+") },
-                            )
-                        }
-                    }
-                }
-            }
-            item {
-                FilterSection("Genres") {
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                        options.genres.forEach { genre ->
-                            FilterChip(
-                                selected = genre in filters.genres,
-                                onClick = { vm.toggleGenre(genre) },
-                                label = { Text(genre) },
-                            )
-                        }
-                    }
-                }
-            }
-            if (options.tags.isNotEmpty()) {
+        },
+        confirmButton = {
+            Button(
+                onClick = onDismiss,
+                shape = RectangleShape,
+                colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                    containerColor = Color.White,
+                    contentColor = Color.Black
+                ),
+                modifier = Modifier.focusHighlight(RectangleShape)
+            ) { Text("Show results", fontWeight = FontWeight.Bold, color = Color.Black) }
+        },
+        text = {
+            LazyColumn(
+                modifier = Modifier.heightIn(max = 500.dp),
+                contentPadding = PaddingValues(bottom = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                item { FilterSection("Sort by") { ChoiceFlow(SearchViewModel.SORTS, filters.sort, vm::setSort) } }
                 item {
-                    FilterSection("Tags") {
+                    FilterSection("Release year") {
                         OutlinedTextField(
-                            value = tagSearch,
-                            onValueChange = { tagSearch = it },
-                            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp).tvEscapeDown(),
-                            placeholder = { Text("Find a tag") },
-                            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                            value = filters.year?.toString().orEmpty(),
+                            onValueChange = { value ->
+                                val digits = value.filter(Char::isDigit).take(4)
+                                vm.setYear(digits.toIntOrNull()?.takeIf { it in 1900..2100 })
+                            },
+                            modifier = Modifier.fillMaxWidth().tvEscapeDown(),
+                            placeholder = { Text("Any year (for example 2024)") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             singleLine = true,
                             shape = RectangleShape,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedContainerColor = Color.Black,
+                                unfocusedContainerColor = Color.Black,
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                            )
                         )
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                            visibleTags.forEach { tag ->
-                                AssistChip(
-                                    onClick = { vm.toggleTag(tag.name) },
-                                    label = { Text(tag.name) },
-                                    leadingIcon = if (tag.name in filters.tags) {
-                                        { Text("✓", color = MaterialTheme.colorScheme.primary) }
-                                    } else null,
+                    }
+                }
+                item { FilterSection("Status") { NullableChoiceFlow(SearchViewModel.STATUSES, filters.status, vm::setStatus) } }
+                item { FilterSection("Format") { NullableChoiceFlow(SearchViewModel.FORMATS, filters.format, vm::setFormat) } }
+                item {
+                    FilterSection("Minimum rating") {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilterChip(selected = filters.minimumScore == null, onClick = { vm.setMinimumScore(null) }, label = { Text("Any") })
+                            SearchViewModel.RATINGS.forEach { rating ->
+                                FilterChip(
+                                    selected = filters.minimumScore == rating,
+                                    onClick = { vm.setMinimumScore(rating) },
+                                    label = { Text("$rating%+") },
                                 )
                             }
                         }
                     }
                 }
-            }
-            item {
-                Button(
-                    onClick = onDismiss,
-                    modifier = Modifier.fillMaxWidth().height(50.dp),
-                    shape = RectangleShape,
-                ) {
-                    Text("Show results", fontWeight = FontWeight.Bold)
+                item {
+                    FilterSection("Genres") {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                            options.genres.forEach { genre ->
+                                FilterChip(
+                                    selected = genre in filters.genres,
+                                    onClick = { vm.toggleGenre(genre) },
+                                    label = { Text(genre) },
+                                )
+                            }
+                        }
+                    }
+                }
+                if (options.tags.isNotEmpty()) {
+                    item {
+                        FilterSection("Tags") {
+                            OutlinedTextField(
+                                value = tagSearch,
+                                onValueChange = { tagSearch = it },
+                                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp).tvEscapeDown(),
+                                placeholder = { Text("Find a tag") },
+                                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                                singleLine = true,
+                                shape = RectangleShape,
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedContainerColor = Color.Black,
+                                    unfocusedContainerColor = Color.Black,
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White,
+                                )
+                            )
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                                visibleTags.forEach { tag ->
+                                    AssistChip(
+                                        onClick = { vm.toggleTag(tag.name) },
+                                        label = { Text(tag.name) },
+                                        leadingIcon = if (tag.name in filters.tags) {
+                                            { Text("✓", color = MaterialTheme.colorScheme.primary) }
+                                        } else null,
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
-    }
+    )
 }
 
 /** TV: text fields consume D-pad Down; hand focus to the next element manually. */

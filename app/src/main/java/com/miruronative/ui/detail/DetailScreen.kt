@@ -39,6 +39,9 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -142,6 +145,26 @@ private fun DetailContent(
     val historyEntry = history.firstOrNull { it.anilistId == info.id }
     val sidebarFocusRequester = remember { FocusRequester() }
     
+    val aniProgress = info.mediaListEntry?.progress ?: 0
+    val localEp = historyEntry?.episodeNumber
+    val localFinished = (historyEntry?.progressFraction ?: 0f) > 0.9f
+    
+    val maxEpisodes = info.episodes?.toDouble() ?: Double.MAX_VALUE
+    val playEpisodeNumRaw = when {
+        localEp != null && localEp >= aniProgress -> if (localFinished) localEp + 1.0 else localEp
+        aniProgress > 0 -> aniProgress + 1.0
+        else -> 1.0
+    }
+    val playEpisodeNum = if (playEpisodeNumRaw > maxEpisodes) maxEpisodes else playEpisodeNumRaw
+    val isResume = localEp != null && localEp == playEpisodeNum && !localFinished
+    val playEpisodeStr = if (playEpisodeNum % 1.0 == 0.0) playEpisodeNum.toInt().toString() else playEpisodeNum.toString()
+    val isMovie = info.format?.uppercase() == "MOVIE"
+    val playLabel = if (isMovie) {
+        if (isResume) "Resume" else "Play"
+    } else {
+        if (isResume) "Resume Episode $playEpisodeStr" else "Play Episode $playEpisodeStr"
+    }
+
     Box(Modifier.fillMaxSize()) {
         // Fullscreen Background
         AsyncImage(
@@ -259,20 +282,7 @@ private fun DetailContent(
                     val episodes = provider?.let {
                         data.episodes.provider(it)?.episodes(selectedCategory).orEmpty()
                     }.orEmpty()
-                    val resumeEpNum = historyEntry?.episodeNumber
-                    val isFinished = (historyEntry?.progressFraction ?: 0f) > 0.9f
-                    val playEpisodeNum = when {
-                        resumeEpNum == null -> 1.0
-                        isFinished -> resumeEpNum + 1.0
-                        else -> resumeEpNum
-                    }
-                    val playEpisodeStr = if (playEpisodeNum % 1.0 == 0.0) playEpisodeNum.toInt().toString() else playEpisodeNum.toString()
-                    val playLabel = when {
-                        resumeEpNum == null -> "Play Episode 1"
-                        isFinished -> "Play next $playEpisodeStr"
-                        else -> "Resume $playEpisodeStr"
-                    }
-                    val playEpisode = playEpisodeStr
+                    
                     var playFocused by remember { mutableStateOf(false) }
                     Row(
                         Modifier
@@ -284,7 +294,7 @@ private fun DetailContent(
                             .border(if (playFocused) 1.dp else 0.dp, Color.White, RoundedCornerShape(4.dp))
                             .clickable {
                                 if (provider != null) {
-                                    onPlay(provider, selectedCategory.api, playEpisode)
+                                    onPlay(provider, selectedCategory.api, playEpisodeStr)
                                 }
                             }
                             .padding(horizontal = 24.dp, vertical = 12.dp),
@@ -309,6 +319,29 @@ private fun DetailContent(
                             )
                         }
                     )
+                    
+                    if (historyEntry != null) {
+                        var showHistoryMenu by remember { mutableStateOf(false) }
+                        Box {
+                            CircleActionButton(
+                                icon = Icons.Default.MoreVert,
+                                onClick = { showHistoryMenu = true }
+                            )
+                            DropdownMenu(
+                                expanded = showHistoryMenu,
+                                onDismissRequest = { showHistoryMenu = false },
+                                modifier = Modifier.background(MaterialTheme.colorScheme.surface, shape = RoundedCornerShape(8.dp)).border(1.dp, androidx.compose.ui.graphics.Color.White.copy(alpha=0.1f), RoundedCornerShape(8.dp))
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("Remove from History", color = androidx.compose.ui.graphics.Color.White) },
+                                    onClick = {
+                                        LibraryStore.removeHistory(info.id)
+                                        showHistoryMenu = false
+                                    }
+                                )
+                            }
+                        }
+                    }
                 }
             }
 
@@ -370,13 +403,19 @@ private fun EpisodesSidebar(
 
     LaunchedEffect(episodes.size) {
         if (!initialScrollDone && episodes.isNotEmpty()) {
-            val nextEpisodeToWatch = (historyEntry?.episodeNumber ?: 0.0) + 1.0
-            
+            val aniProgress = data.info.mediaListEntry?.progress ?: 0
+            val localEp = historyEntry?.episodeNumber
+            val localFinished = (historyEntry?.progressFraction ?: 0f) > 0.9f
+            val playEpisodeNum = when {
+                localEp != null && localEp >= aniProgress -> if (localFinished) localEp + 1.0 else localEp
+                aniProgress > 0 -> aniProgress + 1.0
+                else -> 1.0
+            }
             var foundChunkIndex = 0
             var foundItemIndex = -1
             
             episodeChunks.forEachIndexed { cIndex, chunk ->
-                val indexInChunk = chunk.indexOfFirst { (it.displayNumber.toDoubleOrNull() ?: 0.0) >= nextEpisodeToWatch }
+                val indexInChunk = chunk.indexOfFirst { (it.displayNumber.toDoubleOrNull() ?: 0.0) >= playEpisodeNum }
                 if (indexInChunk != -1 && foundItemIndex == -1) {
                     foundChunkIndex = cIndex
                     foundItemIndex = indexInChunk

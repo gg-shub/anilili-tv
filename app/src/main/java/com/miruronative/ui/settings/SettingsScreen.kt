@@ -1,5 +1,6 @@
 package com.miruronative.ui.settings
 
+import coil.imageLoader
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
@@ -25,8 +26,12 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.ui.graphics.Color
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.SystemUpdate
+import androidx.compose.material.icons.filled.ClosedCaption
+import androidx.compose.material.icons.filled.KeyboardArrowRight
+import com.miruronative.ui.components.CaptionAppearanceDialog
+
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -102,6 +107,7 @@ fun SettingsScreen(
     var pendingMalExport by remember { mutableStateOf<MalExportFile?>(null) }
     var malExportBusy by remember { mutableStateOf(false) }
     var malExportMessage by remember { mutableStateOf<String?>(null) }
+    var captionAppearanceVisible by remember { mutableStateOf(false) }
     var diagnosticsMessage by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(token) { vm.loadIfLoggedIn() }
@@ -202,6 +208,7 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             item { SettingsSectionTitle("Playback") }
+
             item { SettingSwitch("Autoplay next episode", "Continue automatically", autoplay, SettingsStore::setAutoplay) }
             item { SettingSwitch("Auto-skip intro and outro", "Use provider skip times when available", autoSkip, SettingsStore::setAutoSkipIntroOutro) }
             item { SettingSwitch("Prefer dubbed audio", "Use dub first when available", preferDub, SettingsStore::setPreferDub) }
@@ -213,12 +220,22 @@ fun SettingsScreen(
                     SettingsStore::setSubtitlesWithDub,
                 )
             }
+
             item {
                 SettingSwitch(
                     "Use external player",
                     "Play videos in an external app like VLC or MX Player",
                     useExternalPlayer,
                     SettingsStore::setUseExternalPlayer,
+                )
+            }
+            item {
+                SettingsAction(
+                    title = "Caption appearance",
+                    icon = null,
+                    trailingIcon = { Icon(androidx.compose.material.icons.Icons.Default.KeyboardArrowRight, contentDescription = null) },
+                    enabled = true,
+                    onClick = { captionAppearanceVisible = true },
                 )
             }
             item { SectionDivider() }
@@ -285,6 +302,25 @@ fun SettingsScreen(
                     onClick = LibraryStore::clearHistory,
                 )
             }
+            item {
+                val scope = androidx.compose.runtime.rememberCoroutineScope()
+                val context = androidx.compose.ui.platform.LocalContext.current
+                var cacheCleared by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+                SettingsAction(
+                    title = if (cacheCleared) "Cache cleared" else "Clear cache",
+                    icon = { Icon(Icons.Default.DeleteSweep, contentDescription = null) },
+                    enabled = !cacheCleared,
+                    onClick = {
+                        scope.launch {
+                            com.miruronative.data.AppGraph.repository.clearCache()
+                            com.miruronative.data.AppGraph.httpClient.cache?.evictAll()
+                            context.imageLoader.diskCache?.clear()
+                            context.imageLoader.memoryCache?.clear()
+                            cacheCleared = true
+                        }
+                    },
+                )
+            }
             item { SectionDivider() }
 
             item { SettingsSectionTitle("App") }
@@ -337,6 +373,14 @@ fun SettingsScreen(
                 }
             }
             item {
+                SettingsAction(
+                    title = "Check for updates",
+                    icon = { Icon(Icons.Default.Refresh, contentDescription = null) },
+                    enabled = true,
+                    onClick = { UpdateManager.check(context, manual = true) },
+                )
+            }
+            item {
                 Text(
                     "Version ${UpdateManager.currentVersion}",
                     style = MaterialTheme.typography.labelSmall,
@@ -345,6 +389,10 @@ fun SettingsScreen(
                 )
             }
         }
+    }
+    
+    if (captionAppearanceVisible) {
+        CaptionAppearanceDialog(onDismiss = { captionAppearanceVisible = false })
     }
 }
 
@@ -384,7 +432,8 @@ private fun SettingSwitch(
 @Composable
 private fun SettingsAction(
     title: String,
-    icon: @Composable () -> Unit,
+    icon: (@Composable () -> Unit)? = null,
+    trailingIcon: (@Composable () -> Unit)? = null,
     enabled: Boolean,
     onClick: () -> Unit,
 ) {
@@ -394,8 +443,15 @@ private fun SettingsAction(
         modifier = Modifier.fillMaxWidth().focusHighlight(RoundedCornerShape(8.dp)),
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
     ) {
-        icon()
-        Text(title, modifier = Modifier.padding(start = 10.dp).weight(1f))
+        if (icon != null) {
+            icon()
+            Text(title, modifier = Modifier.padding(start = 10.dp).weight(1f))
+        } else {
+            Text(title, modifier = Modifier.weight(1f))
+        }
+        if (trailingIcon != null) {
+            trailingIcon()
+        }
     }
 }
 
