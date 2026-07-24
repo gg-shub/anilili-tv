@@ -14,6 +14,6 @@ Miruro streams are requested through the Miruro pipe endpoint and decoded on dev
 | :---: | :---: | :---: |
 | <a href="showcase/home.png"><img src="showcase/home.png" width="450" alt="Anilili TV home screen" /></a> | <a href="showcase/search.png"><img src="showcase/search.png" width="450" alt="Anime search and browse" /></a> | <a href="showcase/details.png"><img src="showcase/details.png" width="450" alt="Anime details and episode selection" /></a> |
 
-| Watch | Player controls | Library |
+| Player | Player controls | Library |
 | :---: | :---: | :---: |
 | <a href="showcase/player.png"><img src="showcase/player.png" width="450" alt="Player" /></a> | <a href="showcase/player2.png"><img src="showcase/player2.png" width="450" alt="Schedule" /></a> | <a href="showcase/schedule.png"><img src="showcase/library.png" width="450" alt="Library with watchlist and continue watching" /></a> |
