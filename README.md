@@ -1,4 +1,4 @@
-# Anilili-TV
+# Anilili TV
 
 Anilili is a native Android anime streaming client built with Kotlin, Jetpack Compose, and Media3. **This specific fork has been optimized for Android TV devices**, with modern Material 3 interface and full D-pad remote support. 
 
