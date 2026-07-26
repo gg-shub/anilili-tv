@@ -1,3 +1,6 @@
+import java.util.Properties
+import com.android.build.OutputFile
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -5,8 +8,6 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
 }
-
-import java.util.Properties
 
 val keystoreProperties = Properties().apply {
     val file = rootProject.file("keystore.properties")
@@ -20,10 +21,12 @@ android {
 
     defaultConfig {
         applicationId = "com.miruronative"
-        minSdk = 26
+        // Fire OS 5 devices (including the 1st/2nd-gen Fire TV Sticks) report API 22.
+        minSdk = 22
         targetSdk = 36
-        versionCode = 18
-        versionName = "1.0.5"
+        versionCode = 26
+        versionName = "1.1.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
@@ -41,12 +44,16 @@ android {
     buildTypes {
         debug {
             manifestPlaceholders["usesCleartextTraffic"] = "true"
+            // TEMP: install alongside the release build as com.miruronative.debug so testing
+            // never collides with (and forces an uninstall of) the release's LibraryStore data.
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
         }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
             signingConfig = signingConfigs.getByName("release")
-            manifestPlaceholders["usesCleartextTraffic"] = "true"
+            manifestPlaceholders["usesCleartextTraffic"] = "false"
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
@@ -55,6 +62,7 @@ android {
     }
 
     compileOptions {
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
@@ -65,18 +73,49 @@ android {
         compose = true
         buildConfig = true
     }
+    testOptions {
+        unitTests {
+            // Production code logs through DiagnosticsLog, which reads SystemClock. Without this,
+            // any unit test that walks a logging path dies on "not mocked" instead of asserting.
+            isReturnDefaultValues = true
+        }
+    }
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
 
+    // Fire TV hardware is ARM. Publish a small APK for each ARM generation and retain a
+    // universal APK for users who do not know which one their device needs.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("armeabi-v7a", "arm64-v8a")
+            isUniversalApk = true
+        }
+    }
+
     applicationVariants.all {
         outputs.all {
-            (this as com.android.build.gradle.internal.api.BaseVariantOutputImpl).outputFileName = "anilili.apk"
+            val output = this as com.android.build.gradle.internal.api.BaseVariantOutputImpl
+            val abi = output.getFilter(OutputFile.ABI)
+            val buildTypeSuffix = if (buildType.name == "release") "" else "-${buildType.name}"
+            // Updaters in v0.1.32 and earlier install the release's first .apk asset, and
+            // GitHub orders assets by name: '.' sorts before '_', so "Anilili.apk" (universal,
+            // runs on every ABI) must precede "Anilili_<abi>.apk". Never name splits with '-';
+            // '-' sorts before '.' and legacy TVs would fetch an incompatible split.
+            output.outputFileName = if (abi == null) {
+                "Anilili$buildTypeSuffix.apk"
+            } else {
+                "Anilili${buildTypeSuffix}_$abi.apk"
+            }
         }
     }
 }
 
 dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.3")
+
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
@@ -100,16 +139,15 @@ dependencies {
     implementation(libs.androidx.media3.datasource.cronet)
     implementation(libs.androidx.media3.database)
     implementation(libs.androidx.media3.cast)
+    implementation(libs.androidx.media3.transformer)
     implementation(libs.play.services.cronet)
     implementation(libs.androidx.appcompat)
+    implementation(libs.androidx.webkit)
     implementation(libs.androidx.fragment.ktx)
-
-    implementation("com.google.zxing:core:3.4.1")
-    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
-
+    implementation(libs.okio)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.coil.compose)
     implementation(libs.androidx.room.runtime)
@@ -117,5 +155,10 @@ dependencies {
     ksp(libs.androidx.room.compiler)
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.work.runtime.ktx)
+    implementation(libs.androidx.tvprovider)
+    implementation(libs.zxing.core)
     testImplementation(libs.junit)
+    androidTestImplementation("androidx.test:core-ktx:1.6.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }
