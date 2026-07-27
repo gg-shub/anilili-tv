@@ -17,8 +17,27 @@ object MediaCache {
         instance ?: SimpleCache(
             File(context.applicationContext.cacheDir, "media"),
             LeastRecentlyUsedCacheEvictor(MAX_BYTES),
-            StandaloneDatabaseProvider(context.applicationContext),
+            // Shared with the download index. Both caches live in the same exoplayer_internal.db,
+            // so a second provider means a second SQLiteOpenHelper on one file — duplicated setup
+            // and needless lock contention between playback and downloads.
+            ExoDatabase.provider(context),
         ).also { instance = it }
+    }
+
+    /**
+     * Removes every cached segment, freeing the disk space under [cacheDir]/media. Keeps the
+     * singleton valid so an active player keeps working against the now-empty cache. A segment
+     * currently locked by an in-flight read is left in place. Does disk IO; call off the main thread.
+     */
+    fun clear(context: Context) {
+        val cache = get(context)
+        for (key in cache.keys.toList()) {
+            try {
+                cache.removeResource(key)
+            } catch (_: Exception) {
+                // Locked or already-gone resource; skip it and keep clearing the rest.
+            }
+        }
     }
 
     private const val MAX_BYTES = 512L * 1024 * 1024

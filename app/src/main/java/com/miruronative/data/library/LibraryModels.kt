@@ -1,5 +1,6 @@
 package com.miruronative.data.library
 
+import com.miruronative.data.model.MediaListEntry
 import kotlinx.serialization.Serializable
 
 /** One "continue watching" record per anime — the last episode watched + resume position. */
@@ -15,6 +16,12 @@ data class HistoryEntry(
     val positionMs: Long = 0,
     val durationMs: Long = 0,
     val updatedAt: Long = 0,
+    /**
+     * Seeded from AniList/MAL progress rather than actual playback here. Refreshed wholesale on
+     * every remote sync (so remote progress moves it forward), replaced by a real record the
+     * moment the user plays the title, and dropped on logout.
+     */
+    val fromRemote: Boolean = false,
 ) {
     val progressFraction: Float
         get() = if (durationMs > 0) (positionMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
@@ -22,6 +29,10 @@ data class HistoryEntry(
     val episodeLabel: String
         get() = if (episodeNumber % 1.0 == 0.0) episodeNumber.toInt().toString() else episodeNumber.toString()
 }
+
+/** Canonical watch-history order used by every screen: the latest playback comes first. */
+internal fun sortHistoryLatestFirst(entries: List<HistoryEntry>): List<HistoryEntry> =
+    entries.sortedByDescending(HistoryEntry::updatedAt)
 
 /** A saved series the user wants to watch. */
 @Serializable
@@ -33,6 +44,31 @@ data class WatchlistEntry(
     val averageScore: Int? = null,
     val addedAt: Long = 0,
 )
+
+/** Persisted snapshot of a title's status on the signed-in list service. */
+@Serializable
+data class RemoteListStatus(
+    val anilistId: Int,
+    val status: String,
+)
+
+internal fun remoteListStatuses(entries: List<MediaListEntry>): Map<Int, String> = entries
+    .mapNotNull { entry ->
+        val id = entry.media?.id ?: return@mapNotNull null
+        val status = entry.status?.trim()?.uppercase()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+        id to status
+    }
+    .toMap()
+
+internal fun mediaListStatusLabel(status: String?): String? = when (status?.uppercase()) {
+    "CURRENT" -> "Watching"
+    "REPEATING" -> "Rewatching"
+    "PLANNING" -> "Plan to watch"
+    "PAUSED" -> "Paused"
+    "COMPLETED" -> "Completed"
+    "DROPPED" -> "Dropped"
+    else -> null
+}
 
 internal fun mergeWatchlistEntries(
     local: List<WatchlistEntry>,

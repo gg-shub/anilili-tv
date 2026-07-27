@@ -43,6 +43,9 @@ class PipeClient(
             put("method", "GET")
             put("query", query)
             put("body", JsonNull)
+            // The web frontend stamps its protocol version on every pipe request; matching it
+            // keeps us indistinguishable from the site if the server starts enforcing it.
+            put("version", "0.1.0")
         }
         val e = base64UrlEncode(envelope.toString().toByteArray(Charsets.UTF_8))
         val rawJson = PipeBridge.fetch(e)
@@ -178,7 +181,11 @@ class PipeClient(
             )
         }
 
-        return SourcesResult(streams, subtitles, skip, root.str("download"))
+        val download = root.str("download")
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+            ?.let(::normalizePipeDownloadUrl)
+        return SourcesResult(streams, subtitles, skip, download)
     }
 
     /** Mirrors MiruroAPI's translateId: base64url ids that decode to `prov:realId` are decoded. */
@@ -232,3 +239,17 @@ class PipeClient(
             }
     }
 }
+
+/**
+ * Miruro's web client rewrites legacy AnimePahe download pages through this public compatibility
+ * worker. Keeping the same rewrite prevents users from being sent to the retired pahe.win host.
+ */
+internal fun normalizePipeDownloadUrl(url: String): String =
+    if (url.startsWith(PAHE_DOWNLOAD_ORIGIN)) {
+        PAHE_DOWNLOAD_WORKER + url.removePrefix(PAHE_DOWNLOAD_ORIGIN)
+    } else {
+        url
+    }
+
+private const val PAHE_DOWNLOAD_ORIGIN = "https://pahe.win/"
+private const val PAHE_DOWNLOAD_WORKER = "https://orange-leaf-cefa.asd-968.workers.dev/"

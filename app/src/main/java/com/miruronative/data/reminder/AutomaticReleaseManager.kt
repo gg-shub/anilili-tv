@@ -60,11 +60,13 @@ object AutomaticReleaseManager {
 
     fun init(context: Context) {
         appContext = context.applicationContext
-        appContext.getSystemService(NotificationManager::class.java).createNotificationChannel(
-            NotificationChannel(CHANNEL_ID, "New episode releases", NotificationManager.IMPORTANCE_DEFAULT).apply {
-                description = "Alerts when a new episode airs for anime saved here or on AniList"
-            },
-        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            notificationManager().createNotificationChannel(
+                NotificationChannel(CHANNEL_ID, "New episode releases", NotificationManager.IMPORTANCE_DEFAULT).apply {
+                    description = "Alerts when a new episode airs for anime saved here or on AniList"
+                },
+            )
+        }
         val oldestUseful = System.currentTimeMillis() / 1000L - 24 * 60 * 60
         synchronized(lock) {
             alarms = read().filter { it.airingAt >= oldestUseful }
@@ -121,16 +123,18 @@ object AutomaticReleaseManager {
 
     private fun schedule(alarm: ReleaseAlarm) {
         val triggerAt = (alarm.airingAt * 1000L).coerceAtLeast(System.currentTimeMillis() + 1_000L)
-        appContext.getSystemService(AlarmManager::class.java).setAndAllowWhileIdle(
-            AlarmManager.RTC_WAKEUP,
-            triggerAt,
-            pendingIntent(alarm, PendingIntent.FLAG_UPDATE_CURRENT) ?: return,
-        )
+        val pending = pendingIntent(alarm, PendingIntent.FLAG_UPDATE_CURRENT) ?: return
+        val manager = alarmManager()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
+        } else {
+            manager.setExact(AlarmManager.RTC_WAKEUP, triggerAt, pending)
+        }
     }
 
     private fun cancel(alarm: ReleaseAlarm) {
         pendingIntent(alarm, PendingIntent.FLAG_NO_CREATE)?.let { pending ->
-            appContext.getSystemService(AlarmManager::class.java).cancel(pending)
+            alarmManager().cancel(pending)
             pending.cancel()
         }
     }
@@ -145,6 +149,12 @@ object AutomaticReleaseManager {
             .putExtra("title", alarm.title),
         mode or PendingIntent.FLAG_IMMUTABLE,
     )
+
+    private fun alarmManager(): AlarmManager =
+        appContext.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+
+    private fun notificationManager(): NotificationManager =
+        appContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
     private fun persist(value: List<ReleaseAlarm>) {
         val raw = json.encodeToString(ListSerializer(ReleaseAlarm.serializer()), value)
@@ -192,8 +202,21 @@ class AutomaticReleaseReceiver : BroadcastReceiver() {
             .setCategory(NotificationCompat.CATEGORY_EVENT)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .build()
-        context.getSystemService(NotificationManager::class.java)
-            .notify(17 * mediaId + episode, notification)
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.notify(17 * mediaId + episode, notification)
+        // Group summary so multiple release alerts collapse into one expandable entry.
+        manager.notify(
+            -1002,
+            NotificationCompat.Builder(context, AutomaticReleaseManager.CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle("New episode releases")
+                .setContentIntent(open)
+                .setGroup(AutomaticReleaseManager.CHANNEL_ID)
+                .setGroupSummary(true)
+                .setAutoCancel(true)
+                .setCategory(NotificationCompat.CATEGORY_EVENT)
+                .build(),
+        )
     }
 }
 
@@ -244,7 +267,8 @@ class ReleaseSyncWorker(
             }
             if (AuthManager.isLoggedIn) {
                 runCatching {
-                    val (items, _) = repo.notifications(markAllRead = false)
+                    val (items, unread) = repo.notifications(markAllRead = false)
+                    NotificationCenter.setUnread(unread)
                     AniListNotificationPushManager.notifyUnread(applicationContext, items)
                 }
 

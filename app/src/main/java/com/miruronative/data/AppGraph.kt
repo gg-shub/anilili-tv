@@ -6,6 +6,8 @@ import com.miruronative.data.remote.AniListClient
 import com.miruronative.data.remote.AniSkipClient
 import com.miruronative.data.remote.AnivexaClient
 import com.miruronative.data.remote.JikanClient
+import com.miruronative.data.remote.KonohaClient
+import com.miruronative.data.remote.MalClient
 import com.miruronative.data.remote.PipeClient
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
@@ -23,8 +25,15 @@ object AppGraph {
     lateinit var httpClient: OkHttpClient
         private set
 
-    fun init(@Suppress("UNUSED_PARAMETER") context: Context) {
+    /** TV boxes are memory/CPU-starved; non-UI layers use this to throttle background work. */
+    var isTv: Boolean = false
+        private set
+
+    fun init(context: Context) {
         if (::repository.isInitialized) return
+
+        isTv = (context.getSystemService(Context.UI_MODE_SERVICE) as? android.app.UiModeManager)
+            ?.currentModeType == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
 
         val json = Json {
             ignoreUnknownKeys = true
@@ -42,13 +51,16 @@ object AppGraph {
             .build()
 
         val aniList = AniListClient(httpClient, json)
+        val cache = AppCache(context, json)
         repository = MiruroRepository(
             aniList = aniList,
             pipe = PipeClient(json),
-            anivexa = AnivexaClient(httpClient, json, aniList),
+            anivexa = AnivexaClient(context, httpClient, json, aniList, cache),
             jikan = JikanClient(httpClient, json),
             aniSkip = AniSkipClient(httpClient, json),
-            cache = AppCache(context, json),
+            mal = MalClient(httpClient, json),
+            konoha = KonohaClient(context, httpClient, json, cache),
+            cache = cache,
         )
     }
 }

@@ -10,6 +10,7 @@ import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import com.miruronative.data.settings.SettingsStore
 import com.miruronative.diagnostics.DiagnosticsLog
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
@@ -29,13 +30,85 @@ data class RawPipeResponse(val ok: Boolean, val status: Int, val obf: String?, v
  */
 @SuppressLint("StaticFieldLeak")
 object PipeBridge {
-    const val ORIGIN = "https://www.miruro.to"
+    /**
+     * Mirror domains, tried in order. ISPs block these piecemeal (user logs show .to timing out
+     * on one network while others resolve), so a main-frame load failure rolls to the next
+     * mirror instead of taking every pipe request down with it.
+     */
+    private val ORIGINS = listOf(
+        "https://www.miruro.to",
+        "https://www.miruro.tv",
+        "https://www.miruro.bz",
+    )
 
     private val main = Handler(Looper.getMainLooper())
+
+    /**
+     * The hidden tab hosts the full miruro SPA, whose scripts/animations otherwise run for the
+     * whole session — on a Fire TV stick its compositor can exhaust Chromium's tile budget and
+     * leave the visible episode black while audio continues. Idle (View.onPause) the WebView
+     * shortly after the last pipe request completes; each fetch resumes it first. The CF
+     * session/cookies survive onPause just fine.
+     */
+    private const val IDLE_AFTER_MS = 2_000L
+    private val idleRunnable = Runnable {
+        webView?.onPause()
+        DiagnosticsLog.event("PipeBridge webview idled")
+    }
+
+    private fun scheduleIdle() {
+        main.removeCallbacks(idleRunnable)
+        main.postDelayed(idleRunnable, IDLE_AFTER_MS)
+    }
+
+    private fun scheduleIdleIfUnused() {
+        main.post {
+            if (pending.isEmpty()) scheduleIdle()
+        }
+    }
+
+    /**
+     * How long a mirror gets to finish loading before it is treated as unreachable.
+     *
+     * `onReceivedError` only fires once the network stack gives up, which on a blocking ISP took
+     * 32 seconds per mirror in a user's log — 64 seconds of dead time before the third mirror was
+     * even tried, and by then the catalog wait had long since expired and the app reported "no
+     * sources" for a title with plenty. Rolling over on our own clock keeps that bounded.
+     */
+    private const val MIRROR_TIMEOUT_MS = 7_000L
+
     @Volatile private var webView: WebView? = null
     @Volatile private var ready = CompletableDeferred<Boolean>()
+    @Volatile private var originIndex = 0
     private val pending = ConcurrentHashMap<String, CompletableDeferred<String>>()
     private val counter = AtomicLong(0)
+
+    private val activeOrigin: String get() = ORIGINS[originIndex]
+
+    private val mirrorWatchdog = Runnable {
+        DiagnosticsLog.event("PipeBridge mirror timed out after ${MIRROR_TIMEOUT_MS}ms origin=$activeOrigin")
+        advanceMirror()
+    }
+
+    private fun armMirrorWatchdog() {
+        main.removeCallbacks(mirrorWatchdog)
+        main.postDelayed(mirrorWatchdog, MIRROR_TIMEOUT_MS)
+    }
+
+    /** Rolls to the next mirror, or gives up once they are exhausted. Main thread only. */
+    private fun advanceMirror() {
+        main.removeCallbacks(mirrorWatchdog)
+        if (ready.isCompleted) return
+        if (originIndex < ORIGINS.lastIndex) {
+            originIndex++
+            DiagnosticsLog.event("PipeBridge trying mirror $activeOrigin")
+            armMirrorWatchdog()
+            webView?.loadUrl("$activeOrigin/")
+        } else {
+            DiagnosticsLog.event("PipeBridge all mirrors failed")
+            ready.complete(false)
+        }
+    }
 
     /** Called from the hosting Composable on the main thread with a freshly created WebView. */
     @SuppressLint("SetJavaScriptEnabled")
@@ -55,13 +128,15 @@ object PipeBridge {
         }
         wv.addJavascriptInterface(Bridge, "AndroidPipe")
         wv.webViewClient = object : WebViewClient() {
-            // Pin the tab to miruro.to — block ad popunders / intent: redirects that would
-            // navigate away and kill the same-origin pipe session.
+            // Pin the tab to Miruro's mirrors — block ad popunders / intent: redirects that
+            // would navigate away and kill the same-origin pipe session.
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 val url = request?.url ?: return true
                 val host = url.host.orEmpty().lowercase()
-                val allowed = url.scheme == "https" &&
-                    (host == "miruro.to" || host.endsWith(".miruro.to"))
+                val allowed = url.scheme == "https" && ORIGINS.any { origin ->
+                    val originHost = origin.removePrefix("https://www.")
+                    host == originHost || host.endsWith(".$originHost")
+                }
                 if (!allowed) {
                     DiagnosticsLog.event("PipeBridge blocked nav: $url")
                     Log.d(TAG, "blocked nav: $url")
@@ -77,27 +152,38 @@ object PipeBridge {
                 DiagnosticsLog.event("PipeBridge page finished: ${url ?: "unknown"} title=${view?.title ?: "none"}")
                 Log.d(TAG, "onPageFinished: $url  title=${view?.title}")
                 // Give Cloudflare a moment to settle, then allow fetches.
-                if (url != null && url.startsWith(ORIGIN)) {
-                    main.postDelayed({ if (!ready.isCompleted) ready.complete(true) }, 2000)
+                if (url != null && url.startsWith(activeOrigin)) {
+                    main.removeCallbacks(mirrorWatchdog)
+                    // Remember what worked. On a network that blocks the first mirrors, starting
+                    // from scratch every launch means paying the whole failover walk every time.
+                    SettingsStore.setLastWorkingPipeOrigin(activeOrigin)
+                    main.postDelayed(
+                        {
+                            if (!ready.isCompleted) ready.complete(true)
+                            scheduleIdle()
+                        },
+                        2000,
+                    )
                 }
             }
 
+            @android.annotation.TargetApi(android.os.Build.VERSION_CODES.M)
             override fun onReceivedError(
                 view: WebView?,
                 request: WebResourceRequest?,
                 error: android.webkit.WebResourceError?,
             ) {
-                if (request?.isForMainFrame == true) {
-                    DiagnosticsLog.event(
-                        "PipeBridge main-frame error code=${error?.errorCode} " +
-                            "description=${error?.description}",
-                    )
-                }
-                // Main-frame load failed (offline, DNS, site down): unblock waiters so pipe
-                // requests fail fast to the cache/error path instead of stalling 25 s each.
-                if (request?.isForMainFrame == true && !ready.isCompleted) ready.complete(false)
+                if (request?.isForMainFrame != true) return
+                DiagnosticsLog.event(
+                    "PipeBridge main-frame error code=${error?.errorCode} " +
+                        "description=${error?.description} origin=$activeOrigin",
+                )
+                // This mirror is unreachable (ISP block, DNS, site down): roll to the next one.
+                // Only once all mirrors fail do waiters unblock into the cache/error path.
+                main.post { advanceMirror() }
             }
 
+            @android.annotation.TargetApi(android.os.Build.VERSION_CODES.O)
             override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
                 DiagnosticsLog.event(
                     "PipeBridge render process gone didCrash=${detail?.didCrash()} " +
@@ -107,14 +193,19 @@ object PipeBridge {
                 return true
             }
         }
-        DiagnosticsLog.event("PipeBridge load origin=$ORIGIN")
-        wv.loadUrl("$ORIGIN/")
+        // Start from whichever mirror last answered on this network, so a user whose ISP blocks
+        // the first ones pays the failover walk once rather than on every launch.
+        originIndex = ORIGINS.indexOf(SettingsStore.lastWorkingPipeOrigin.value).coerceAtLeast(0)
+        DiagnosticsLog.event("PipeBridge load origin=$activeOrigin")
+        armMirrorWatchdog()
+        wv.loadUrl("$activeOrigin/")
     }
 
     /** Releases the attached browser and fails requests that can no longer complete. */
     fun detach(wv: WebView) {
         if (webView !== wv) return
         DiagnosticsLog.event("PipeBridge.detach")
+        main.removeCallbacks(idleRunnable)
         webView = null
         ready = CompletableDeferred()
         pending.entries.toList().forEach { (id, request) ->
@@ -165,6 +256,8 @@ object PipeBridge {
             if (wv == null) {
                 pending.remove(id)?.complete("""{"ok":false,"status":-1,"error":"webview not ready"}""")
             } else {
+                main.removeCallbacks(idleRunnable)
+                wv.onResume()
                 wv.evaluateJavascript(js, null)
             }
         }
@@ -175,6 +268,7 @@ object PipeBridge {
                 DiagnosticsLog.event("PipeBridge fetch timeout e.len=${e.length}")
                 """{"ok":false,"status":-1,"error":"timeout"}"""
             }
+        scheduleIdleIfUnused()
         Log.d(TAG, "fetch(e.len=${e.length}) -> ${result.take(180)}")
         return result
     }

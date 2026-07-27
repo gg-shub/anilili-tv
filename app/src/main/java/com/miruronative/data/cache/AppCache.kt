@@ -12,6 +12,7 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import com.miruronative.data.AppGraph
 import com.miruronative.diagnostics.DiagnosticsLog
 import java.util.LinkedHashMap
 import kotlinx.coroutines.CoroutineScope
@@ -42,6 +43,9 @@ interface CacheDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun put(entry: CacheEntry)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun putAll(entries: List<CacheEntry>)
 
     @Query("UPDATE cache_entries SET lastAccessedAt = :now WHERE `key` = :key OR instr(`key`, :chunkPrefix) = 1")
     suspend fun touchTree(key: String, chunkPrefix: String, now: Long)
@@ -85,9 +89,10 @@ class AppCache(
     ).fallbackToDestructiveMigration(true).build().cacheDao()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val keyLocks = Array(64) { Mutex() }
-    private val memory = object : LinkedHashMap<String, CacheEntry>(MEMORY_ENTRIES, 0.75f, true) {
+    private val memoryLimit = if (AppGraph.isTv) 40 else MEMORY_ENTRIES
+    private val memory = object : LinkedHashMap<String, CacheEntry>(memoryLimit, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CacheEntry>?): Boolean =
-            size > MEMORY_ENTRIES
+            size > memoryLimit
     }
 
     suspend fun <T> getOrFetch(
@@ -96,6 +101,13 @@ class AppCache(
         ttlMs: Long,
         staleForMs: Long = DEFAULT_STALE_MS,
         forceRefresh: Boolean = false,
+        /**
+         * Gate on storing a freshly fetched value. A result assembled from partly-failed upstreams
+         * is still usable right now but must not be written as if it were authoritative — see
+         * [MiruroRepository.anivexaEpisodes], where a degraded network otherwise pinned a thin
+         * catalog for hours and the only way out was clearing app data.
+         */
+        cacheIf: (T) -> Boolean = { true },
         fetch: suspend () -> T,
     ): T {
         val now = System.currentTimeMillis()
@@ -109,7 +121,7 @@ class AppCache(
             touch(cached, now)
             scope.launch {
                 try {
-                    refresh(key, serializer, ttlMs, false, fetch)
+                    refresh(key, serializer, ttlMs, false, cacheIf, fetch)
                 } catch (_: Exception) {
                     // The stale value remains available until its safety window closes.
                 }
@@ -117,7 +129,7 @@ class AppCache(
             return decoded
         }
         return try {
-            refresh(key, serializer, ttlMs, forceRefresh, fetch)
+            refresh(key, serializer, ttlMs, forceRefresh, cacheIf, fetch)
         } catch (e: Exception) {
             // Last-known-good fallback: an expired entry beats an error screen when the
             // network or an upstream (e.g. Cloudflare in front of AniList) is refusing us.
@@ -126,11 +138,40 @@ class AppCache(
         }
     }
 
+    suspend fun hasKey(key: String): Boolean {
+        return read(key) != null
+    }
+
+    /** Fresh-only read: the decoded value when [key] exists and hasn't expired, else null. */
+    suspend fun <T> getIfFresh(key: String, serializer: KSerializer<T>): T? {
+        val now = System.currentTimeMillis()
+        val entry = read(key) ?: return null
+        if (now > entry.expiresAt) return null
+        val value = decode(entry, serializer) ?: return null
+        touch(entry, now)
+        return value
+    }
+
+    suspend fun putBatch(entries: Map<String, String>, ttlMs: Long) {
+        val now = System.currentTimeMillis()
+        val cacheEntries = entries.map { (key, jsonString) ->
+            CacheEntry(
+                key = key,
+                payload = CachePayloadCodec.encode(jsonString),
+                createdAt = now,
+                expiresAt = now + ttlMs,
+                lastAccessedAt = now,
+            )
+        }
+        dao.putAll(cacheEntries)
+    }
+
     private suspend fun <T> refresh(
         key: String,
         serializer: KSerializer<T>,
         ttlMs: Long,
         forceRefresh: Boolean,
+        cacheIf: (T) -> Boolean,
         fetch: suspend () -> T,
     ): T {
         val lock = keyLocks[(key.hashCode() and Int.MAX_VALUE) % keyLocks.size]
@@ -142,6 +183,10 @@ class AppCache(
                 }
 
                 val value = fetch()
+                if (!cacheIf(value)) {
+                    DiagnosticsLog.event("AppCache skipped storing degraded value key=$key")
+                    return@withLock value
+                }
                 val payload = CachePayloadCodec.encode(json.encodeToString(serializer, value))
                 val entry = CacheEntry(
                     key = key,
@@ -223,8 +268,8 @@ class AppCache(
 
     private companion object {
         const val CHUNK_MARKER = "cache-chunks:"
-        const val MEMORY_ENTRIES = 80
-        const val DISK_ENTRIES = 500
+        const val MEMORY_ENTRIES = 150
+        const val DISK_ENTRIES = 800
         const val DEFAULT_STALE_MS = 7L * 24 * 60 * 60 * 1000
         const val DISK_STALE_RETENTION_MS = 30L * 24 * 60 * 60 * 1000
 

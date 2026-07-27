@@ -10,6 +10,7 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStoreFile
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import com.miruronative.data.AppGraph
 import com.miruronative.diagnostics.CrashReporter
 import java.io.IOException
 import java.util.Locale
@@ -35,8 +36,100 @@ enum class MenuLanguage(val storedValue: String) {
     }
 }
 
+/** How an episode list is drawn: rich rows with stills, or compact number chips. */
+enum class EpisodeLayout(val storedValue: String) {
+    LIST("list"),
+    GRID("grid");
+
+    fun toggled(): EpisodeLayout = if (this == LIST) GRID else LIST
+
+    companion object {
+        fun fromStored(value: String?): EpisodeLayout =
+            entries.firstOrNull { it.storedValue == value } ?: LIST
+    }
+}
+
+enum class DefaultQuality(val storedValue: String, val label: String) {
+    AUTO("auto", "Auto"),
+    HIGHEST("highest", "Highest"),
+    P1080("1080", "1080p"),
+    P720("720", "720p"),
+    P480("480", "480p");
+
+    /** Best matching height from [heights], or null to leave adaptive selection alone. */
+    fun pickHeight(heights: List<Int>): Int? = when (this) {
+        AUTO -> null
+        HIGHEST -> heights.maxOrNull()
+        // Closest height without going over; a low-quality-only source still plays its best.
+        else -> {
+            val target = storedValue.toInt()
+            heights.filter { it <= target }.maxOrNull() ?: heights.minOrNull()
+        }
+    }
+
+    companion object {
+        fun fromStored(value: String?): DefaultQuality =
+            entries.firstOrNull { it.storedValue == value } ?: HIGHEST
+    }
+}
+
+/** Maximum video rendition kept in an offline download. */
+enum class DownloadQuality(
+    val storedValue: String,
+    val label: String,
+    val maxHeight: Int?,
+) {
+    BEST("best", "Best available", null),
+    P1080("1080", "1080p", 1080),
+    P720("720", "720p", 720),
+    P480("480", "480p", 480),
+    P360("360", "360p", 360);
+
+    companion object {
+        fun fromStored(value: String?): DownloadQuality =
+            entries.firstOrNull { it.storedValue == value } ?: BEST
+    }
+}
+
+/**
+ * Where a downloaded episode ends up.
+ *
+ * Downloads-folder copies are always built from a library download that is then rewrapped into a
+ * single MP4, so `DEVICE_ONLY` does not skip the library — it drops the cached copy afterwards.
+ */
+enum class DownloadDestination(val storedValue: String, val label: String) {
+    APP_ONLY("app", "Anilili library"),
+    DEVICE_ONLY("device", "Device Downloads"),
+    BOTH("both", "Both");
+
+    val includesApp: Boolean get() = this != DEVICE_ONLY
+    val includesDevice: Boolean get() = this != APP_ONLY
+
+    companion object {
+        /**
+         * Downloads become an MP4 in the device's Downloads folder unless the viewer says
+         * otherwise: an episode that only exists as Media3 cache segments is useful to this app
+         * and nothing else, and the offline library keeps working either way because it plays the
+         * exported file directly.
+         */
+        fun fromStored(value: String?): DownloadDestination =
+            entries.firstOrNull { it.storedValue == value } ?: DEVICE_ONLY
+    }
+}
+
+/**
+ * The quality to use before the viewer has chosen one. TV sticks start adaptive: pinning the
+ * highest rendition turns ABR off, so a hardware decoder that gets preempted or falls behind has
+ * no lower rung to drop to and the picture simply dies. Everything else opens at its sharpest.
+ */
+private fun deviceDefaultQuality(): DefaultQuality =
+    if (AppGraph.isTv) DefaultQuality.AUTO else DefaultQuality.HIGHEST
+
 /** No global server has been chosen yet; the launch route supplies the initial server. */
 const val DEFAULT_PREFERRED_PROVIDER = "auto"
+
+/** How many servers the user can rank. Beyond three, the catalog's own order takes over anyway. */
+const val MAX_SERVER_PRIORITY = 3
 
 /** Transactional DataStore preferences shared by playback and the Library settings UI. */
 object SettingsStore {
@@ -64,8 +157,19 @@ object SettingsStore {
     private val _hideAdultContent = MutableStateFlow(true)
     val hideAdultContent = _hideAdultContent.asStateFlow()
 
+    /**
+     * Brightness, volume and drag-to-seek gestures over the picture. Off means the player only
+     * responds to its on-screen controls — the edge drags are easy to trigger by accident when
+     * you are only trying to reveal the bar. TV never had them.
+     */
+    private val _playerGestures = MutableStateFlow(true)
+    val playerGestures = _playerGestures.asStateFlow()
+
     private val _subtitlesWithDub = MutableStateFlow(false)
     val subtitlesWithDub = _subtitlesWithDub.asStateFlow()
+
+    private val _updateCheckOnLaunch = MutableStateFlow(true)
+    val updateCheckOnLaunch = _updateCheckOnLaunch.asStateFlow()
 
     // Kept as one compound value rather than a flow per field: both players and the editor read
     // the whole style at once, and a partial style is never meaningful.
@@ -75,6 +179,38 @@ object SettingsStore {
     private val _menuLanguage = MutableStateFlow(MenuLanguage.SYSTEM)
     val menuLanguage = _menuLanguage.asStateFlow()
 
+    private val _defaultQuality = MutableStateFlow(deviceDefaultQuality())
+    val defaultQuality = _defaultQuality.asStateFlow()
+
+    private val _downloadQuality = MutableStateFlow(DownloadQuality.BEST)
+    val downloadQuality = _downloadQuality.asStateFlow()
+
+    private val _downloadDestination = MutableStateFlow(DownloadDestination.DEVICE_ONLY)
+    val downloadDestination = _downloadDestination.asStateFlow()
+
+    // Set once and expected to stick: the viewer who wants dense number chips for a long-runner
+    // wants them on the next screen too, not just until they navigate away.
+    private val _episodeLayout = MutableStateFlow(EpisodeLayout.LIST)
+    val episodeLayout = _episodeLayout.asStateFlow()
+
+    /**
+     * The Miruro mirror that last loaded successfully on this network. ISPs block the mirrors
+     * piecemeal, and rediscovering that from scratch each launch costs the whole failover walk.
+     */
+    private val _lastWorkingPipeOrigin = MutableStateFlow("")
+    val lastWorkingPipeOrigin = _lastWorkingPipeOrigin.asStateFlow()
+
+    /**
+     * The user's servers in the order they should be tried, first choice first, at most
+     * [MAX_SERVER_PRIORITY] of them. Empty means "no pinned choice" — the catalog's own order.
+     */
+    private val _serverPriority = MutableStateFlow<List<String>>(emptyList())
+    val serverPriority = _serverPriority.asStateFlow()
+
+    /**
+     * Head of [serverPriority], or "auto" when nothing is pinned. Kept as its own flow because the
+     * player's server sheet, the ★ badge, and the watch route all read a single preferred name.
+     */
     private val _preferredProvider = MutableStateFlow(DEFAULT_PREFERRED_PROVIDER)
     val preferredProvider = _preferredProvider.asStateFlow()
     private val loaded = MutableStateFlow(false)
@@ -106,6 +242,7 @@ object SettingsStore {
     fun setAutoSkipIntroOutro(value: Boolean) = save(AUTO_SKIP_INTRO_OUTRO, value, _autoSkipIntroOutro)
     fun setHideAdultContent(value: Boolean) = save(HIDE_ADULT_CONTENT, value, _hideAdultContent)
     fun setSubtitlesWithDub(value: Boolean) = save(SUBTITLES_WITH_DUB, value, _subtitlesWithDub)
+    fun setUpdateCheckOnLaunch(value: Boolean) = save(UPDATE_CHECK_ON_LAUNCH, value, _updateCheckOnLaunch)
 
     fun setCaptionBackgroundOpacity(percent: Int) =
         editCaptionStyle { it.copy(backgroundOpacityPercent = percent.coerceIn(0, 100)) }
@@ -113,18 +250,76 @@ object SettingsStore {
         editCaptionStyle { it.copy(backgroundColor = value) }
     fun setCaptionTextScale(percent: Int) =
         editCaptionStyle { it.copy(textScalePercent = percent.coerceIn(CaptionStyle.MIN_TEXT_SCALE_PERCENT, CaptionStyle.MAX_TEXT_SCALE_PERCENT)) }
+    fun setCaptionBold(value: Boolean) = editCaptionStyle { it.copy(boldText = value) }
+    fun setCaptionBottomMargin(percent: Int) =
+        editCaptionStyle { it.copy(bottomMarginPercent = percent.coerceIn(CaptionStyle.MIN_BOTTOM_MARGIN_PERCENT, CaptionStyle.MAX_BOTTOM_MARGIN_PERCENT)) }
     fun setCaptionTextColor(value: CaptionTextColor) = editCaptionStyle { it.copy(textColor = value) }
     fun setCaptionEdgeStyle(value: CaptionEdgeStyle) = editCaptionStyle { it.copy(edgeStyle = value) }
     fun resetCaptionStyle() = editCaptionStyle { CaptionStyle() }
+
+    fun setDefaultQuality(value: DefaultQuality) {
+        _defaultQuality.value = value
+        scope.launch { store.edit { it[DEFAULT_QUALITY] = value.storedValue } }
+    }
+
+    fun setDownloadQuality(value: DownloadQuality) {
+        _downloadQuality.value = value
+        scope.launch { store.edit { it[DOWNLOAD_QUALITY] = value.storedValue } }
+    }
+
+    fun setDownloadDestination(value: DownloadDestination) {
+        _downloadDestination.value = value
+        scope.launch { store.edit { it[DOWNLOAD_DESTINATION] = value.storedValue } }
+    }
+
+    fun setEpisodeLayout(value: EpisodeLayout) {
+        _episodeLayout.value = value
+        scope.launch { store.edit { it[EPISODE_LAYOUT] = value.storedValue } }
+    }
 
     fun setMenuLanguage(value: MenuLanguage) {
         _menuLanguage.value = value
         scope.launch { store.edit { it[MENU_LANGUAGE] = value.storedValue } }
     }
+    /** Normalises, de-duplicates and caps a priority list, then mirrors the head into [preferredProvider]. */
+    private fun applyServerPriority(value: List<String>) {
+        val clean = value.map { it.trim().lowercase() }
+            .filter { it.isNotBlank() && it != DEFAULT_PREFERRED_PROVIDER }
+            .distinct()
+            .take(MAX_SERVER_PRIORITY)
+        _serverPriority.value = clean
+        _preferredProvider.value = clean.firstOrNull() ?: DEFAULT_PREFERRED_PROVIDER
+    }
+
+    fun setPlayerGestures(value: Boolean) {
+        _playerGestures.value = value
+        scope.launch { store.edit { it[PLAYER_GESTURES] = value } }
+    }
+
+    fun setLastWorkingPipeOrigin(value: String) {
+        if (_lastWorkingPipeOrigin.value == value) return
+        _lastWorkingPipeOrigin.value = value
+        scope.launch { store.edit { it[LAST_PIPE_ORIGIN] = value } }
+    }
+
+    fun setServerPriority(value: List<String>) {
+        applyServerPriority(value)
+        val stored = _serverPriority.value.joinToString(",")
+        scope.launch { store.edit { it[SERVER_PRIORITY] = stored } }
+    }
+
+    /**
+     * Promotes [value] to first choice, keeping the rest of the order behind it. Picking "auto"
+     * clears the whole list — with no first choice there is nothing for the fallbacks to fall back
+     * from, and leaving them would silently promote one the user never chose.
+     */
     fun setPreferredProvider(value: String) {
-        val storedValue = value.trim().lowercase().ifBlank { DEFAULT_PREFERRED_PROVIDER }
-        _preferredProvider.value = storedValue
-        scope.launch { store.edit { it[PREFERRED_PROVIDER] = storedValue } }
+        val name = value.trim().lowercase().ifBlank { DEFAULT_PREFERRED_PROVIDER }
+        if (name == DEFAULT_PREFERRED_PROVIDER) {
+            setServerPriority(emptyList())
+        } else {
+            setServerPriority(listOf(name) + _serverPriority.value.filterNot { it == name })
+        }
     }
 
     /** Guarantees cold-start consumers see the persisted preference instead of the in-memory default. */
@@ -145,6 +340,8 @@ object SettingsStore {
                 prefs[CAPTION_BACKGROUND_OPACITY] = next.backgroundOpacityPercent
                 prefs[CAPTION_BACKGROUND_COLOR] = next.backgroundColor.storedValue
                 prefs[CAPTION_TEXT_SCALE] = next.textScalePercent
+                prefs[CAPTION_BOLD_TEXT] = next.boldText
+                prefs[CAPTION_BOTTOM_MARGIN] = next.bottomMarginPercent
                 prefs[CAPTION_TEXT_COLOR] = next.textColor.storedValue
                 prefs[CAPTION_EDGE_STYLE] = next.edgeStyle.storedValue
             }
@@ -157,6 +354,9 @@ object SettingsStore {
         backgroundColor = CaptionBackgroundColor.fromStored(prefs[CAPTION_BACKGROUND_COLOR]),
         textScalePercent = prefs[CAPTION_TEXT_SCALE]?.coerceIn(CaptionStyle.MIN_TEXT_SCALE_PERCENT, CaptionStyle.MAX_TEXT_SCALE_PERCENT)
             ?: CaptionStyle.DEFAULT_TEXT_SCALE_PERCENT,
+        boldText = prefs[CAPTION_BOLD_TEXT] ?: CaptionStyle.DEFAULT_BOLD_TEXT,
+        bottomMarginPercent = prefs[CAPTION_BOTTOM_MARGIN]?.coerceIn(CaptionStyle.MIN_BOTTOM_MARGIN_PERCENT, CaptionStyle.MAX_BOTTOM_MARGIN_PERCENT)
+            ?: CaptionStyle.DEFAULT_BOTTOM_MARGIN_PERCENT,
         textColor = CaptionTextColor.fromStored(prefs[CAPTION_TEXT_COLOR]),
         edgeStyle = CaptionEdgeStyle.fromStored(prefs[CAPTION_EDGE_STYLE]),
     )
@@ -170,10 +370,22 @@ object SettingsStore {
         _autoSkipIntroOutro.value = prefs[AUTO_SKIP_INTRO_OUTRO] ?: false
         _hideAdultContent.value = prefs[HIDE_ADULT_CONTENT] ?: true
         _subtitlesWithDub.value = prefs[SUBTITLES_WITH_DUB] ?: false
+        _updateCheckOnLaunch.value = prefs[UPDATE_CHECK_ON_LAUNCH] ?: true
         _captionStyle.value = readCaptionStyle(prefs)
         _menuLanguage.value = MenuLanguage.fromStored(prefs[MENU_LANGUAGE])
-        _preferredProvider.value =
-            prefs[PREFERRED_PROVIDER]?.takeIf(String::isNotBlank) ?: DEFAULT_PREFERRED_PROVIDER
+        _defaultQuality.value = prefs[DEFAULT_QUALITY]?.let(DefaultQuality::fromStored)
+            ?: deviceDefaultQuality()
+        _downloadQuality.value = DownloadQuality.fromStored(prefs[DOWNLOAD_QUALITY])
+        _downloadDestination.value = DownloadDestination.fromStored(prefs[DOWNLOAD_DESTINATION])
+        _episodeLayout.value = EpisodeLayout.fromStored(prefs[EPISODE_LAYOUT])
+        // Installs that predate the ordered list still carry a single preferred server; seed the
+        // list from it so an existing choice survives the upgrade rather than resetting to auto.
+        applyServerPriority(
+            prefs[SERVER_PRIORITY]?.takeIf(String::isNotBlank)?.split(",")
+                ?: listOfNotNull(prefs[PREFERRED_PROVIDER]?.takeIf(String::isNotBlank)),
+        )
+        _playerGestures.value = prefs[PLAYER_GESTURES] ?: true
+        _lastWorkingPipeOrigin.value = prefs[LAST_PIPE_ORIGIN].orEmpty()
         loaded.value = true
     }
 
@@ -201,12 +413,22 @@ object SettingsStore {
     private val AUTO_SKIP_INTRO_OUTRO = booleanPreferencesKey("auto_skip_intro_outro")
     private val HIDE_ADULT_CONTENT = booleanPreferencesKey("hide_adult_content")
     private val SUBTITLES_WITH_DUB = booleanPreferencesKey("subtitles_with_dub")
+    private val UPDATE_CHECK_ON_LAUNCH = booleanPreferencesKey("update_check_on_launch")
     private val CAPTION_BACKGROUND_OPACITY = intPreferencesKey("caption_background_opacity")
     private val CAPTION_BACKGROUND_COLOR = stringPreferencesKey("caption_background_color")
     private val CAPTION_TEXT_SCALE = intPreferencesKey("caption_text_scale")
+    private val CAPTION_BOLD_TEXT = booleanPreferencesKey("caption_bold_text")
+    private val CAPTION_BOTTOM_MARGIN = intPreferencesKey("caption_bottom_margin")
     private val CAPTION_TEXT_COLOR = stringPreferencesKey("caption_text_color")
     private val CAPTION_EDGE_STYLE = stringPreferencesKey("caption_edge_style")
     private val MENU_LANGUAGE = stringPreferencesKey("menu_language")
+    private val DEFAULT_QUALITY = stringPreferencesKey("default_quality")
+    private val DOWNLOAD_QUALITY = stringPreferencesKey("download_quality")
+    private val DOWNLOAD_DESTINATION = stringPreferencesKey("download_destination")
+    private val EPISODE_LAYOUT = stringPreferencesKey("episode_layout")
     private val PREFERRED_PROVIDER = stringPreferencesKey("preferred_provider")
+    private val SERVER_PRIORITY = stringPreferencesKey("server_priority")
+    private val LAST_PIPE_ORIGIN = stringPreferencesKey("last_pipe_origin")
+    private val PLAYER_GESTURES = booleanPreferencesKey("player_gestures")
     private val MIGRATED = booleanPreferencesKey("migrated_from_shared_preferences")
 }

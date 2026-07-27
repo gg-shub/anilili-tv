@@ -22,6 +22,20 @@ data class EpisodeItem(
     val filler: Boolean,
 ) {
     val displayNumber: String get() = if (number % 1.0 == 0.0) number.toInt().toString() else number.toString()
+
+    /**
+     * The episode's own title, or null when the source only echoed the number back ("Episode 6",
+     * "EP 6", "6"). Several providers fill the field that way rather than leaving it empty, and
+     * such a title must not shadow a real one from the metadata overlay or get printed twice in a
+     * row that already shows the number.
+     */
+    val distinctTitle: String? get() {
+        val trimmed = title?.trim()?.takeIf { it.isNotEmpty() && it != "null" } ?: return null
+        val echoesNumber = trimmed.equals("Episode $displayNumber", ignoreCase = true) ||
+            trimmed.equals("EP $displayNumber", ignoreCase = true) ||
+            trimmed == displayNumber
+        return trimmed.takeUnless { echoesNumber }
+    }
 }
 
 @Serializable
@@ -56,6 +70,19 @@ data class StreamItem(
     val width: Int?,
     val height: Int?,
     val playlistKey: String? = null,
+    /**
+     * Extra request headers this stream's CDN needs on every manifest and segment fetch, beyond
+     * the Referer/Origin pair derived from [referer]. Carries short-lived per-playback tokens
+     * (Hentai Haven's `X-Video-*` trio), so it is resolved fresh at playback rather than cached.
+     */
+    val headers: Map<String, String> = emptyMap(),
+    /**
+     * Play this source over the plain HTTP transport instead of Cronet. Hentai Haven's CDN trips
+     * an assertion inside `CronetDataSource.read` a second into playback ("Source error"), while
+     * the identical manifest plays clean on `DefaultHttpDataSource` — measured on device, and the
+     * segments themselves verify as valid fMP4 either way.
+     */
+    val avoidCronet: Boolean = false,
 ) {
     val isHls: Boolean get() = type.equals("hls", true) || url.contains(".m3u8")
     val isEmbed: Boolean get() = type.equals("embed", true)
@@ -77,6 +104,12 @@ data class SourcesResult(
     val subtitles: List<SubtitleItem>,
     val skip: SkipTimes?,
     val download: String?,
+    /**
+     * How far these subtitles need shifting to line up with the stream, in milliseconds. Non-zero
+     * only where a provider was caught handing out a file cut for a different encode of the same
+     * episode; the player seeds its subtitle delay from it.
+     */
+    val subtitleOffsetMs: Long = 0L,
 ) {
     val hlsStreams: List<StreamItem> get() = streams.filter { it.isHls }
     val embedStreams: List<StreamItem> get() = streams.filter { it.isEmbed }

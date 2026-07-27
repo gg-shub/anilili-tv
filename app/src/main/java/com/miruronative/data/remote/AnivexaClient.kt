@@ -10,16 +10,21 @@ import com.miruronative.data.model.SourcesResult
 import com.miruronative.data.model.StreamItem
 import com.miruronative.data.model.SubtitleItem
 import com.miruronative.diagnostics.DiagnosticsLog
+import java.io.IOException
 import java.net.URI
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.Collections
 import java.util.LinkedHashMap
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -28,8 +33,41 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
+
+/** MegaPlay paths carry the episode's hash then the encode's: `/{episode}/{encode}/master.m3u8`. */
+private val MEGAPLAY_ENCODE_TAG = Regex("""/([0-9a-f]{32})(?=/)""")
+
+/** Provider fallbacks may ignore ordinary failures, but never consume coroutine cancellation. */
+private inline fun <T> runProviderCatching(block: () -> T): Result<T> = runCatching(block).onFailure {
+    if (it is CancellationException) throw it
+}
+
+/**
+ * The encode's own hash in a MegaPlay URL, or null if the path is not shaped that way. Streams and
+ * subtitle files that belong together carry the same one; a subtitle file quoting a different
+ * encode than its stream is one cut for another release of the episode.
+ */
+internal fun megaPlayEncodeTag(url: String?): String? = url
+    ?.let { MEGAPLAY_ENCODE_TAG.findAll(it).map { match -> match.groupValues[1] }.toList() }
+    ?.getOrNull(1)
+
+/**
+ * How far a borrowed subtitle file sits from the stream it was handed to, judged from where each
+ * encode's intro starts. Under a second is measurement noise in the provider's own marks; over a
+ * minute is not a difference in head footage and is more likely mismatched episode data, so both
+ * are treated as "leave the subtitles alone".
+ */
+internal fun borrowedSubtitleOffsetMs(dubIntroSeconds: Double?, subIntroSeconds: Double?): Long {
+    val dubIntro = dubIntroSeconds ?: return 0L
+    val subIntro = subIntroSeconds ?: return 0L
+    val offsetMs = ((dubIntro - subIntro) * 1000.0).toLong()
+    return if (kotlin.math.abs(offsetMs) in 1_000L..60_000L) offsetMs else 0L
+}
 
 /**
  * Native Android implementation of the additional providers that used to be reached through
@@ -37,9 +75,11 @@ import okhttp3.Request
  * extraction happen lazily when a user starts an episode.
  */
 class AnivexaClient(
+    private val context: android.content.Context,
     private val client: OkHttpClient,
     private val json: Json,
     private val aniList: AniListClient,
+    private val cache: com.miruronative.data.cache.AppCache,
 ) {
     private data class Candidate(val slug: String, val title: String)
     private data class MegaPlayEmbed(val url: String, val referer: String, val skip: SkipTimes?)
@@ -52,12 +92,43 @@ class AnivexaClient(
         val embedAvailable: Boolean,
     )
 
+    // A provider host must never inherit the app-wide 45 second call budget. Coroutine timeouts
+    // cancel the async calls below immediately; this client is also a hard backstop for the few
+    // legacy provider parsers that still execute synchronous OkHttp calls.
+    private val providerClient = client.newBuilder()
+        .connectTimeout(PROVIDER_HTTP_CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        .readTimeout(PROVIDER_HTTP_CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        .callTimeout(PROVIDER_HTTP_CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        .build()
+
     private val mediaCache = boundedMap<Int, Media>(100)
     private val identityCache = boundedMap<String, String>(250)
-    private val allAnime = AllAnimeProvider(client, json)
-    private val animeKai = AnimeKaiProvider(client)
+    private val allAnime = AllAnimeProvider(providerClient, json)
+    private val animeKai = AnimeKaiProvider(providerClient)
+    private val senshi = SenshiProvider(providerClient, json)
+    private val aniBd = AniBdProvider(providerClient, json)
+    private val kickAssAnime = KickAssAnimeProvider(providerClient, json)
+    private val rareAnimes = RareAnimesProvider(providerClient)
+    private val hanime = HanimeProvider(context, providerClient, json, cache)
+    private val hentaiHaven = HentaiHavenProvider(providerClient, json)
 
-    suspend fun getEpisodes(anilistId: Int, seedMedia: Media? = null): EpisodesResult = withContext(Dispatchers.IO) {
+    /** The device-side hanime library, also used to seed hentai results into search. */
+    suspend fun hanimeCatalogue(): List<HanimeVideo> = hanime.catalogue()
+
+    /** Pull a newer catalogue than the one shipped in the APK. */
+    suspend fun refreshHanimeCatalogue() = hanime.refresh()
+
+    suspend fun getEpisodes(
+        anilistId: Int,
+        seedMedia: Media? = null,
+        // Adult-only providers drop out unless the viewer has asked to see adult content, so a
+        // title that happens to match one by name never offers it uninvited.
+        providers: List<String> = ProviderCatalog.anivexaProvidersFor(
+            com.miruronative.data.settings.SettingsStore.hideAdultContent.value,
+        ),
+        providerTimeoutMs: Long = CATALOG_TIMEOUT_MS,
+    ): EpisodesResult = withContext(Dispatchers.IO) {
+        require(providerTimeoutMs > 0L) { "providerTimeoutMs must be positive" }
         // The caller (repository) has usually already fetched this AniList Media through the shared
         // 24h cache; reuse it so a cold catalog doesn't fire a second, rate-limit-exposed request.
         seedMedia?.let { mediaCache[anilistId] = it }
@@ -71,22 +142,34 @@ class AnivexaClient(
         }
 
         coroutineScope {
-            val lookups = ProviderCatalog.anivexaProviders.associateWith { provider ->
+            val lookups = providers.associateWith { provider ->
                 async {
-                    runCatching {
-                        withTimeout(CATALOG_TIMEOUT_MS) { providerAvailability(provider, media, count) }
-                    }.onFailure {
-                        DiagnosticsLog.throwable("Native episode catalog failed provider=$provider id=$anilistId", it)
-                    }.getOrNull()
+                    try {
+                        val availability = withTimeoutOrNull(providerTimeoutMs) {
+                            providerAvailability(provider, media, count)
+                        }
+                        if (availability == null) {
+                            DiagnosticsLog.event(
+                                "Native episode catalog timeout provider=$provider id=$anilistId " +
+                                    "afterMs=$providerTimeoutMs",
+                            )
+                        }
+                        availability
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        DiagnosticsLog.throwable("Native episode catalog failed provider=$provider id=$anilistId", e)
+                        null
+                    }
                 }
             }
             EpisodesResult(
-                ProviderCatalog.anivexaProviders.mapNotNull { provider ->
+                providers.mapNotNull { provider ->
                     lookups.getValue(provider).await()?.let { availability ->
                         ProviderData(
                             name = provider,
-                            sub = episodeRows(provider, anilistId, "sub", availability.sub),
-                            dub = episodeRows(provider, anilistId, "dub", availability.dub),
+                            sub = episodeRows(provider, media, "sub", availability.sub),
+                            dub = episodeRows(provider, media, "dub", availability.dub),
                         )
                     }
                 },
@@ -94,20 +177,26 @@ class AnivexaClient(
         }
     }
 
-    suspend fun getSources(episodeId: String, seedMedia: Media? = null): SourcesResult = withContext(Dispatchers.IO) {
+    suspend fun getSources(episodeId: String, seedMedia: Media? = null): SourcesResult {
         val request = NativeProviderParsers.episodeRequest(episodeId)
             ?: error("Invalid native provider episode id: $episodeId")
         seedMedia?.let { mediaCache[request.anilistId] = it }
         val media = media(request.anilistId)
-        when (request.provider) {
+        return when (request.provider) {
+            "senshi" -> runInterruptible(Dispatchers.IO) { senshi.sources(media, request.audio, request.episode) }
+            "anibd" -> runInterruptible(Dispatchers.IO) { aniBd.sources(media, request.audio, request.episode) }
             "anikoto" -> anikoto(media, request.audio, request.episode)
-            "allanime" -> allAnime.sources(media, request.audio, request.episode)
-            "animekai" -> animeKai.sources(media, request.audio, request.episode)
+            "allanime" -> runInterruptible(Dispatchers.IO) { allAnime.sources(media, request.audio, request.episode) }
+            "animekai" -> runInterruptible(Dispatchers.IO) { animeKai.sources(media, request.audio, request.episode) }
+            "kaa" -> runInterruptible(Dispatchers.IO) { kickAssAnime.sources(media, request.audio, request.episode) }
+            "rareanimes" -> runInterruptible(Dispatchers.IO) { rareAnimes.sources(media, request.audio, request.episode) }
             "reanime" -> reanime(media, request.audio, request.episode)
             "anizone" -> anizone(media, request.episode)
             "animegg" -> animegg(media, request.audio, request.episode)
             "anineko" -> anineko(media, request.audio, request.episode)
             "2dhive" -> twoDhive(media, request.audio, request.episode)
+            "hanime" -> hanime.sources(media, request.episode)
+            "hentaihaven" -> runInterruptible(Dispatchers.IO) { hentaiHaven.sources(media, request.episode) }
             else -> error("Unsupported native provider: ${request.provider}")
         }
     }
@@ -116,36 +205,47 @@ class AnivexaClient(
         ?: aniList.animeInfo(id)?.also { mediaCache[id] = it }
         ?: error("Anime $id was not found on AniList")
 
-    private fun episodeRows(provider: String, id: Int, audio: String, numbers: Set<Int>): List<EpisodeItem> =
-        numbers.sorted().map { number ->
+    private fun episodeRows(provider: String, media: Media, audio: String, numbers: Set<Int>): List<EpisodeItem> {
+        // Senshi's catalog carries real episode titles and filler flags; other providers don't.
+        val meta = if (provider == "senshi") senshi.episodeMeta(media) else emptyMap()
+        return numbers.sorted().map { number ->
             EpisodeItem(
-                pipeId = "watch/$provider/$id/$audio/$provider-$number",
+                pipeId = "watch/$provider/${media.id}/$audio/$provider-$number",
                 number = number.toDouble(),
-                title = "Episode $number",
+                title = meta[number]?.title ?: "Episode $number",
                 image = null,
-                filler = false,
+                filler = meta[number]?.filler ?: false,
             )
         }
+    }
 
     private suspend fun providerAvailability(provider: String, media: Media, count: Int): EpisodeAvailability = when (provider) {
+        "senshi" -> runInterruptible(Dispatchers.IO) { senshi.episodeAvailability(media) }
+        "anibd" -> runInterruptible(Dispatchers.IO) { aniBd.episodeAvailability(media) }
         "anikoto" -> anikotoAvailability(media, count)
-        "allanime" -> allAnime.episodeAvailability(media)
-        "animekai" -> animeKai.episodeAvailability(media)
+        "allanime" -> runInterruptible(Dispatchers.IO) { allAnime.episodeAvailability(media) }
+        "animekai" -> runInterruptible(Dispatchers.IO) { animeKai.episodeAvailability(media) }
+        "kaa" -> runInterruptible(Dispatchers.IO) { kickAssAnime.episodeAvailability(media) }
+        "rareanimes" -> runInterruptible(Dispatchers.IO) { rareAnimes.episodeAvailability(media) }
         "reanime" -> reanimeAvailability(media)
         "anizone" -> anizoneAvailability(media, count)
         "animegg" -> animeGgAvailability(media)
         "anineko" -> aniNekoAvailability(media)
         "2dhive" -> twoDhiveAvailability(media, count)
+        "hanime" -> hanime.episodeAvailability(media)
+        "hentaihaven" -> runInterruptible(Dispatchers.IO) { hentaiHaven.episodeAvailability(media) }
         else -> error("Unsupported native provider catalog: $provider")
     }
 
     private suspend fun anikotoAvailability(media: Media, count: Int): EpisodeAvailability = coroutineScope {
-        fun available(audio: String, episode: Int): Boolean {
+        suspend fun available(audio: String, episode: Int): Boolean {
             val ids = listOfNotNull(media.id, media.idMal).distinct()
             return ids.any { id ->
                 val kind = if (id == media.id) "ani" else "mal"
                 val url = "https://megaplay.buzz/stream/$kind/$id/$episode/$audio"
-                val page = runCatching { getText(url, mapOf("Referer" to "https://hianimes.re/")) }.getOrDefault("")
+                val page = runProviderCatching {
+                    getText(url, mapOf("Referer" to "https://hianimes.re/"))
+                }.getOrDefault("")
                 megaPlayPageAvailable(page)
             }
         }
@@ -155,10 +255,10 @@ class AnivexaClient(
         EpisodeAvailability.counts(sub.await(), dub.await())
     }
 
-    private fun reanimeAvailability(media: Media): EpisodeAvailability {
+    private suspend fun reanimeAvailability(media: Media): EpisodeAvailability {
         val base = "https://reanime.to"
         val results = titles(media).flatMap { query ->
-            val root = runCatching {
+            val root = runProviderCatching {
                 getJson("$base/api/v1/search?q=${enc(query)}&limit=20&offset=0") as? JsonObject
             }.getOrNull()
             (root?.get("results") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
@@ -181,21 +281,21 @@ class AnivexaClient(
         )
     }
 
-    private fun anizoneAvailability(media: Media, airedCount: Int): EpisodeAvailability {
+    private suspend fun anizoneAvailability(media: Media, airedCount: Int): EpisodeAvailability {
         val page = getText("https://anizone.to/anime/${anizoneSlug(media)}")
         val pageCount = NativeProviderParsers.labelledEpisodeCount(page)
             ?: error("AniZone returned no episode count")
         return EpisodeAvailability.counts(minOf(pageCount, airedCount), 0)
     }
 
-    private fun animeGgAvailability(media: Media): EpisodeAvailability {
+    private suspend fun animeGgAvailability(media: Media): EpisodeAvailability {
         val page = getText("https://www.animegg.org/series/${animeGgSlug(media)}")
         return NativeProviderParsers.animeGgEpisodes(page).also {
             if (it.sub.isEmpty() && it.dub.isEmpty()) error("AnimeGG returned no episode catalog")
         }
     }
 
-    private fun aniNekoAvailability(media: Media): EpisodeAvailability {
+    private suspend fun aniNekoAvailability(media: Media): EpisodeAvailability {
         val page = getText("https://anineko.to/watch/${aniNekoSlug(media)}")
         return NativeProviderParsers.aniNekoEpisodes(page).also {
             if (it.sub.isEmpty() && it.dub.isEmpty()) error("AniNeko returned no episode catalog")
@@ -204,12 +304,12 @@ class AnivexaClient(
 
     private suspend fun twoDhiveAvailability(media: Media, fallbackCount: Int): EpisodeAvailability = coroutineScope {
         val malId = media.idMal ?: error("2Dhive needs a MyAnimeList id")
-        fun props(episode: Int): JsonObject? = runCatching {
+        suspend fun props(episode: Int): JsonObject? = runProviderCatching {
             extractAstroProps(getText("https://2dhive.com/episode?anime=$malId&ep_num=$episode"))
         }.getOrNull()
         val first = props(1)
         val total = first?.number("totalEpisodes")?.toInt()?.takeIf { it > 0 } ?: fallbackCount
-        fun available(audio: String, episode: Int): Boolean {
+        suspend fun available(audio: String, episode: Int): Boolean {
             val current = if (episode == 1) first else first?.let { props(episode) }
             val has2dHiveServer = (current?.get("servers") as? JsonArray).orEmpty().any { element ->
                 val server = element as? JsonObject
@@ -217,7 +317,7 @@ class AnivexaClient(
                 isDub == (audio == "dub")
             }
             return has2dHiveServer || run {
-                val page = runCatching {
+                val page = runProviderCatching {
                     getText(
                         "https://megaplay.buzz/stream/mal/$malId/$episode/$audio",
                         mapOf("Referer" to "https://2dhive.com/"),
@@ -235,7 +335,7 @@ class AnivexaClient(
         EpisodeAvailability.counts(sub, dub)
     }
 
-    private fun highestAvailable(limit: Int, available: (Int) -> Boolean): Int {
+    private suspend fun highestAvailable(limit: Int, available: suspend (Int) -> Boolean): Int {
         if (limit <= 0 || !available(1)) return 0
         if (limit == 1 || available(limit)) return limit
         var low = 1
@@ -253,7 +353,7 @@ class AnivexaClient(
 
     // ---- AniKoto / MegaPlay ---------------------------------------------------------------
 
-    private fun anikoto(media: Media, audio: String, episode: Int): SourcesResult {
+    private suspend fun anikoto(media: Media, audio: String, episode: Int): SourcesResult {
         val base = "https://megaplay.buzz"
         val primary = MegaPlayEmbed("$base/stream/ani/${media.id}/$episode/$audio", "https://hianimes.re/", null)
         val primaryResult = megaPlaySources(primary)
@@ -262,7 +362,7 @@ class AnivexaClient(
             // MegaPlay hosts the full library but doesn't map every show to an AniList id.
             // Retry by MyAnimeList id (when known) before falling back to scraping the site.
             else -> anikotoMalSources(base, media, audio, episode)
-                ?: runCatching { anikotoSiteEmbed(media, audio, episode)?.let(::megaPlaySources) }
+                ?: runProviderCatching { anikotoSiteEmbed(media, audio, episode)?.let { megaPlaySources(it) } }
                     .getOrNull()
                     ?.takeIf { it.streams.any(StreamItem::isHls) }
                 ?: primaryResult
@@ -272,24 +372,59 @@ class AnivexaClient(
         if (result.embedAvailable) {
             streams += stream(result.embedUrl, "embed", "MegaPlay embed", "${result.origin}/", active = streams.isEmpty())
         }
-        return SourcesResult(streams.distinctBy { it.url }, result.subtitles.distinctBy { it.url }, result.skip, null)
+        val offsetMs = if (audio == "dub") megaPlaySubtitleOffsetMs(result, "https://hianimes.re/") else 0L
+        return SourcesResult(
+            streams.distinctBy { it.url },
+            result.subtitles.distinctBy { it.url },
+            result.skip,
+            null,
+            offsetMs,
+        )
+    }
+
+    /**
+     * MegaPlay hands its dub streams the *sub* encode's subtitle file for shows it holds no
+     * dub-timed subtitles for — verified 2026-07-20 on How a Realist Hero Rebuilt the Kingdom,
+     * whose dub encode's own subtitle folder 404s. The two encodes are not the same cut: the dub
+     * carries extra footage at the head, 7-15 s depending on the episode, so every borrowed line
+     * lands that much early. The gap between the two payloads' intro marks measures it — across
+     * the four episodes checked it matched the difference in stream duration to within a second.
+     *
+     * Returns 0 for the ordinary case where the subtitles belong to the stream they arrived with,
+     * so the extra request only costs the shows that actually borrow.
+     */
+    private suspend fun megaPlaySubtitleOffsetMs(dub: MegaPlayResult, referer: String): Long {
+        val streamTag = megaPlayEncodeTag(dub.streams.firstOrNull(StreamItem::isHls)?.url) ?: return 0L
+        val subtitleTag = megaPlayEncodeTag(dub.subtitles.firstOrNull()?.url) ?: return 0L
+        if (streamTag == subtitleTag) return 0L
+        val subUrl = dub.embedUrl.takeIf { it.endsWith("/dub") }?.dropLast(3)?.plus("sub") ?: return 0L
+        val subResult = runProviderCatching { megaPlaySources(MegaPlayEmbed(subUrl, referer, null)) }.getOrNull()
+            ?: return 0L
+        // Only trust the intro marks once the borrowed file is confirmed to be this encode's own.
+        if (megaPlayEncodeTag(subResult.streams.firstOrNull(StreamItem::isHls)?.url) != subtitleTag) return 0L
+        val offsetMs = borrowedSubtitleOffsetMs(dub.skip?.introStart, subResult.skip?.introStart)
+        DiagnosticsLog.event(
+            "MegaPlay borrowed subtitles stream=$streamTag subs=$subtitleTag offsetMs=$offsetMs",
+        )
+        return offsetMs
     }
 
     /** MegaPlay by MyAnimeList id — covers shows that aren't mapped to an AniList id. */
-    private fun anikotoMalSources(base: String, media: Media, audio: String, episode: Int): MegaPlayResult? {
+    private suspend fun anikotoMalSources(base: String, media: Media, audio: String, episode: Int): MegaPlayResult? {
         val malId = media.idMal ?: return null
         val embed = MegaPlayEmbed("$base/stream/mal/$malId/$episode/$audio", "https://hianimes.re/", null)
-        return runCatching { megaPlaySources(embed) }.getOrNull()?.takeIf { it.streams.any(StreamItem::isHls) }
+        return runProviderCatching { megaPlaySources(embed) }.getOrNull()
+            ?.takeIf { it.streams.any(StreamItem::isHls) }
     }
 
-    private fun megaPlaySources(embed: MegaPlayEmbed): MegaPlayResult {
+    private suspend fun megaPlaySources(embed: MegaPlayEmbed): MegaPlayResult {
         var embedUrl = embed.url
-        var page = runCatching { getText(embedUrl, mapOf("Referer" to embed.referer)) }.getOrDefault("")
+        var page = runProviderCatching { getText(embedUrl, mapOf("Referer" to embed.referer)) }.getOrDefault("")
         val iframe = Regex("""<iframe\b[^>]*src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
             .find(page)?.groupValues?.get(1)
         if (page.data("id").isNullOrBlank() && !iframe.isNullOrBlank()) {
             embedUrl = NativeProviderParsers.absoluteUrl(embedUrl, iframe)
-            page = runCatching { getText(embedUrl, mapOf("Referer" to embed.referer)) }.getOrDefault(page)
+            page = runProviderCatching { getText(embedUrl, mapOf("Referer" to embed.referer)) }.getOrDefault(page)
         }
 
         val streams = mutableListOf<StreamItem>()
@@ -298,7 +433,7 @@ class AnivexaClient(
         val origin = origin(embedUrl)
         var skip = embed.skip
         if (!fileId.isNullOrBlank()) {
-            val source = runCatching {
+            val source = runProviderCatching {
                 getJson("$origin/stream/getSources?id=${enc(fileId)}&id=${enc(fileId)}", mapOf(
                     "Referer" to "$origin/",
                     "X-Requested-With" to "XMLHttpRequest",
@@ -329,7 +464,7 @@ class AnivexaClient(
         )
     }
 
-    private fun anikotoSiteEmbed(media: Media, audio: String, episode: Int): MegaPlayEmbed? {
+    private suspend fun anikotoSiteEmbed(media: Media, audio: String, episode: Int): MegaPlayEmbed? {
         val base = "https://anikototv.to"
         val key = "anikoto-site:${media.id}"
         val cached = identityCache[key]?.let { listOf(Candidate(it, it.replace('-', ' '))) }.orEmpty()
@@ -338,7 +473,7 @@ class AnivexaClient(
             .sortedByDescending { candidateScore(media, it) }
             .take(12)
         candidates.forEach { candidate ->
-            val embed = runCatching { anikotoSiteEmbedForSlug(base, candidate.slug, media, audio, episode) }
+            val embed = runProviderCatching { anikotoSiteEmbedForSlug(base, candidate.slug, media, audio, episode) }
                 .getOrNull()
             if (embed != null) {
                 identityCache[key] = candidate.slug
@@ -348,9 +483,9 @@ class AnivexaClient(
         return null
     }
 
-    private fun anikotoSiteCandidates(base: String, media: Media): List<Candidate> =
+    private suspend fun anikotoSiteCandidates(base: String, media: Media): List<Candidate> =
         titles(media).flatMap { query ->
-            runCatching {
+            runProviderCatching {
                 val search = getJson("$base/ajax/anime/search?keyword=${enc(query)}", xhr("$base/"))
                 val html = htmlResult(search)
                 Regex(
@@ -368,7 +503,7 @@ class AnivexaClient(
             }.getOrDefault(emptyList())
         }.distinctBy { it.slug }
 
-    private fun anikotoSiteEmbedForSlug(
+    private suspend fun anikotoSiteEmbedForSlug(
         base: String,
         slug: String,
         media: Media,
@@ -444,7 +579,7 @@ class AnivexaClient(
             error("ReAnime episode $episode DUB has a known unsynchronized audio track")
         }
         val base = "https://reanime.to"
-        val flix = runCatching { getJson("$base/api/flix/${media.id}/$episode") as? JsonObject }.getOrNull()
+        val flix = runProviderCatching { getJson("$base/api/flix/${media.id}/$episode") as? JsonObject }.getOrNull()
         val links = (flix?.get("servers") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
         val accepted = if (audio == "dub") setOf("dub", "s-dub") else setOf("sub", "s-sub")
         val embeds = links.mapNotNull { link ->
@@ -465,10 +600,10 @@ class AnivexaClient(
         if (embeds.isEmpty()) error("ReAnime episode $episode has no ${audio.uppercase()} servers")
 
         val primary = embeds.first()
-        val embedHtml = runCatching { getText(primary.url, mapOf("Referer" to "$base/")) }.getOrDefault("")
+        val embedHtml = runProviderCatching { getText(primary.url, mapOf("Referer" to "$base/")) }.getOrDefault("")
         val subtitles = ReanimeFlixcloudParser.subtitles(embedHtml, audio)
         val skip = ReanimeFlixcloudParser.skip(embedHtml)
-        val nativeHls = runCatching { FlixcloudBridge.resolve(primary.url, "$base/") }
+        val nativeHls = runProviderCatching { FlixcloudBridge.resolve(primary.url, "$base/") }
             .getOrNull()
 
         val streams = mutableListOf<StreamItem>()
@@ -497,7 +632,7 @@ class AnivexaClient(
 
     // ---- AniZone --------------------------------------------------------------------------
 
-    private fun anizone(media: Media, episode: Int): SourcesResult {
+    private suspend fun anizone(media: Media, episode: Int): SourcesResult {
         val base = "https://anizone.to"
         val slug = anizoneSlug(media)
         val pageUrl = "$base/anime/$slug/$episode"
@@ -516,7 +651,7 @@ class AnivexaClient(
         return SourcesResult(listOf(stream(hls, "hls", "AniZone", pageUrl, true)), subtitles, null, null)
     }
 
-    private fun anizoneSlug(media: Media): String {
+    private suspend fun anizoneSlug(media: Media): String {
         val base = "https://anizone.to"
         return resolveSlug("anizone", media) { query ->
             val html = getText("$base/anime?search=${enc(query)}")
@@ -544,7 +679,7 @@ class AnivexaClient(
 
     // ---- AnimeGG --------------------------------------------------------------------------
 
-    private fun animegg(media: Media, audio: String, episode: Int): SourcesResult {
+    private suspend fun animegg(media: Media, audio: String, episode: Int): SourcesResult {
         val base = "https://www.animegg.org"
         val slug = animeGgSlug(media)
         val series = getText("$base/series/$slug")
@@ -573,7 +708,7 @@ class AnivexaClient(
         val streams = mutableListOf<StreamItem>()
         tabs.take(4).forEachIndexed { index, (id, server) ->
             val embed = "$base/embed/$id"
-            val embedHtml = runCatching { getText(embed, mapOf("Referer" to base)) }.getOrDefault("")
+            val embedHtml = runProviderCatching { getText(embed, mapOf("Referer" to base)) }.getOrDefault("")
             val hlsUrls = NativeProviderParsers.hlsUrls(embedHtml)
             hlsUrls.forEach { url ->
                 streams += stream(NativeProviderParsers.absoluteUrl(base, url), "hls", server, embed, streams.isEmpty())
@@ -592,7 +727,7 @@ class AnivexaClient(
         return SourcesResult(streams.distinctBy { it.url }, emptyList(), null, null)
     }
 
-    private fun animeGgSlug(media: Media): String {
+    private suspend fun animeGgSlug(media: Media): String {
         val base = "https://www.animegg.org"
         return resolveSlug("animegg", media) { query ->
             val html = getText("$base/search/?q=${enc(query)}")
@@ -610,7 +745,7 @@ class AnivexaClient(
 
     // ---- AniNeko --------------------------------------------------------------------------
 
-    private fun anineko(media: Media, audio: String, episode: Int): SourcesResult {
+    private suspend fun anineko(media: Media, audio: String, episode: Int): SourcesResult {
         val base = "https://anineko.to"
         val slug = aniNekoSlug(media)
         val watchUrl = "$base/watch/$slug/ep-$episode"
@@ -627,7 +762,7 @@ class AnivexaClient(
         val streams = mutableListOf<StreamItem>()
         val subtitles = mutableListOf<SubtitleItem>()
         embeds.distinct().take(4).forEachIndexed { index, embed ->
-            val embedHtml = runCatching { getText(embed, mapOf("Referer" to "$base/")) }.getOrDefault("")
+            val embedHtml = runProviderCatching { getText(embed, mapOf("Referer" to "$base/")) }.getOrDefault("")
             NativeProviderParsers.hlsUrls(embedHtml).forEach { hls ->
                 streams += stream(hls, "hls", "AniNeko", embed, streams.isEmpty())
             }
@@ -637,7 +772,7 @@ class AnivexaClient(
         return SourcesResult(streams.distinctBy { it.url }, subtitles.distinctBy { it.url }, null, null)
     }
 
-    private fun aniNekoSlug(media: Media): String {
+    private suspend fun aniNekoSlug(media: Media): String {
         val base = "https://anineko.to"
         return resolveSlug("anineko", media) { query ->
             val html = getText("$base/browser?keyword=${enc(query)}")
@@ -676,14 +811,14 @@ class AnivexaClient(
 
     // ---- 2Dhive ---------------------------------------------------------------------------
 
-    private fun twoDhive(media: Media, audio: String, episode: Int): SourcesResult {
+    private suspend fun twoDhive(media: Media, audio: String, episode: Int): SourcesResult {
         val malId = media.idMal ?: error("2Dhive needs a MyAnimeList id")
         val base = "https://2dhive.com"
         val referer = "$base/episode?anime=$malId&ep_num=$episode"
         val streams = mutableListOf<StreamItem>()
         val subtitles = mutableListOf<SubtitleItem>()
 
-        val props = runCatching { extractAstroProps(getText(referer)) }.getOrNull()
+        val props = runProviderCatching { extractAstroProps(getText(referer)) }.getOrNull()
         val matchingServers = (props?.get("servers") as? JsonArray).orEmpty().mapNotNull { element ->
             val server = element as? JsonObject ?: return@mapNotNull null
             val isDub = server["dub"]?.let { (it as? JsonPrimitive)?.booleanOrNull } ?: false
@@ -693,7 +828,7 @@ class AnivexaClient(
             server.string("slug")
         }
         matchingServers.take(3).forEach { slug ->
-            val direct = runCatching {
+            val direct = runProviderCatching {
                 (getJson("$base/api/hadfree?slug=${enc(slug)}", mapOf("Referer" to referer)) as? JsonObject)
                     ?.string("streamUrl")
             }.getOrNull()
@@ -704,12 +839,12 @@ class AnivexaClient(
         }
 
         if (audio == "sub") {
-            val hiAnime = runCatching {
+            val hiAnime = runProviderCatching {
                 getJson("$base/api/hianime?mal_id=$malId&ep_num=$episode", mapOf("Referer" to referer)) as? JsonObject
             }.getOrNull()
             val hls = hiAnime?.string("m3u8")
             val usableHls = hls?.takeIf { url ->
-                runCatching { getText(url, mapOf("Referer" to referer)).trimStart().startsWith("#EXTM3U") }
+                runProviderCatching { getText(url, mapOf("Referer" to referer)).trimStart().startsWith("#EXTM3U") }
                     .getOrDefault(false)
             }
             usableHls?.let { streams += stream(it, "hls", "2Dhive hiAnime", referer, streams.isEmpty()) }
@@ -718,22 +853,31 @@ class AnivexaClient(
             }
         }
         val embed = "https://megaplay.buzz/stream/mal/$malId/$episode/${if (audio == "dub") "dub" else "sub"}"
-        runCatching { megaPlaySources(MegaPlayEmbed(embed, referer, null)) }.getOrNull()?.let { megaPlay ->
+        var subtitleOffsetMs = 0L
+        runProviderCatching { megaPlaySources(MegaPlayEmbed(embed, referer, null)) }.getOrNull()?.let { megaPlay ->
             streams += megaPlay.streams
             subtitles += megaPlay.subtitles
             if (megaPlay.embedAvailable) {
                 streams += stream(megaPlay.embedUrl, "embed", "2Dhive MegaPlay", referer, streams.isEmpty())
             }
+            // The dub fallback here is MegaPlay's, so it borrows subtitles the same way AniKoto does.
+            if (audio == "dub") subtitleOffsetMs = megaPlaySubtitleOffsetMs(megaPlay, referer)
         }
-        return SourcesResult(streams, subtitles, null, null)
+        return SourcesResult(streams, subtitles, null, null, subtitleOffsetMs)
     }
 
     // ---- Shared ---------------------------------------------------------------------------
 
-    private fun resolveSlug(provider: String, media: Media, search: (String) -> List<Candidate>): String {
+    private suspend fun resolveSlug(
+        provider: String,
+        media: Media,
+        search: suspend (String) -> List<Candidate>,
+    ): String {
         val key = "$provider:${media.id}"
         identityCache[key]?.let { return it }
-        val candidates = titles(media).flatMap { title -> runCatching { search(title) }.getOrDefault(emptyList()) }
+        val candidates = titles(media).flatMap { title ->
+            runProviderCatching { search(title) }.getOrDefault(emptyList())
+        }
             .distinctBy { it.slug }
         val chosen = candidates.maxByOrNull { candidateScore(media, it) }
             ?: error("${ProviderCatalog.label(provider)} match not found")
@@ -776,19 +920,36 @@ class AnivexaClient(
         else -> ""
     }
 
-    private fun getText(url: String, headers: Map<String, String> = emptyMap()): String {
-        val builder = Request.Builder().url(url)
-            .header("User-Agent", USER_AGENT)
-            .header("Accept", "text/html,application/json,*/*")
-        headers.forEach(builder::header)
-        client.newCall(builder.get().build()).execute().use { response ->
-            val body = response.body?.string().orEmpty()
-            if (!response.isSuccessful) error("HTTP ${response.code} fetching $url")
-            return body
-        }
-    }
+    private suspend fun getText(url: String, headers: Map<String, String> = emptyMap()): String =
+        suspendCancellableCoroutine { continuation ->
+            val builder = Request.Builder().url(url)
+                .header("User-Agent", USER_AGENT)
+                .header("Accept", "text/html,application/json,*/*")
+            headers.forEach(builder::header)
+            val call = providerClient.newCall(builder.get().build())
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    continuation.resumeWith(Result.failure(e))
+                }
 
-    private fun getJson(url: String, headers: Map<String, String> = emptyMap()): JsonElement =
+                override fun onResponse(call: Call, response: Response) {
+                    try {
+                        val body = response.use {
+                            if (!response.isSuccessful) {
+                                throw IOException("HTTP ${response.code} fetching $url")
+                            }
+                            response.body?.string().orEmpty()
+                        }
+                        continuation.resumeWith(Result.success(body))
+                    } catch (e: Exception) {
+                        continuation.resumeWith(Result.failure(e))
+                    }
+                }
+            })
+        }
+
+    private suspend fun getJson(url: String, headers: Map<String, String> = emptyMap()): JsonElement =
         json.parseToJsonElement(getText(url, headers + ("Accept" to "application/json, */*")))
 
     private fun stream(url: String, type: String, label: String, referer: String?, active: Boolean) = StreamItem(
@@ -837,14 +998,28 @@ class AnivexaClient(
         }
     }
 
-    private fun language(label: String?): String = when (label?.lowercase()) {
-        "english", "en" -> "en"
-        "japanese", "ja" -> "ja"
-        "french", "fr" -> "fr"
-        "german", "de" -> "de"
-        "spanish", "es" -> "es"
-        "portuguese", "pt" -> "pt"
-        else -> "und"
+    /**
+     * MegaPlay/AniKoto label the track by its full language name ("Indonesian", "Thai captions",
+     * "Spanish(Latin America)"). Match on a contained keyword rather than an exact string so the
+     * suffixes and " captions" qualifiers still resolve. Anything unrecognised stays "und" but the
+     * human label is preserved for the picker either way.
+     */
+    private fun language(label: String?): String {
+        val text = label?.lowercase() ?: return "und"
+        return when {
+            text.contains("english") || text == "en" -> "en"
+            text.contains("japanese") || text == "ja" -> "ja"
+            text.contains("indonesian") || text == "id" -> "id"
+            text.contains("thai") || text == "th" -> "th"
+            text.contains("arabic") || text == "ar" -> "ar"
+            text.contains("french") || text == "fr" -> "fr"
+            text.contains("german") || text == "de" -> "de"
+            text.contains("spanish") || text == "es" -> "es"
+            text.contains("portuguese") || text == "pt" -> "pt"
+            text.contains("italian") || text == "it" -> "it"
+            text.contains("russian") || text == "ru" -> "ru"
+            else -> "und"
+        }
     }
 
     private fun origin(url: String): String = runCatching {
@@ -861,6 +1036,7 @@ class AnivexaClient(
 
     companion object {
         private const val CATALOG_TIMEOUT_MS = 15_000L
+        private const val PROVIDER_HTTP_CALL_TIMEOUT_MS = 15_000L
         private val REANIME_BAD_DUB_MUXES = setOf(113415 to 2)
         private const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"

@@ -6,6 +6,7 @@ import com.miruronative.data.model.GqlDiscoverOptionsResponse
 import com.miruronative.data.model.GqlHomeCollectionsResponse
 import com.miruronative.data.model.GqlMediaResponse
 import com.miruronative.data.model.GqlPageResponse
+import com.miruronative.data.model.GqlStudioPageResponse
 import com.miruronative.data.model.GqlViewerResponse
 import com.miruronative.data.model.GqlViewerFavouritesResponse
 import com.miruronative.data.model.GraphQLRequest
@@ -15,6 +16,7 @@ import com.miruronative.data.model.DiscoverFilters
 import com.miruronative.data.model.DiscoverOptions
 import com.miruronative.data.model.MediaListCollection
 import com.miruronative.data.model.MediaPage
+import com.miruronative.data.model.StudioNode
 import com.miruronative.data.model.Viewer
 import com.miruronative.diagnostics.DiagnosticsLog
 import kotlinx.coroutines.Dispatchers
@@ -44,6 +46,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * AniList GraphQL metadata client. Ports the query set from MiruroAPI's anilist.js.
@@ -64,6 +67,7 @@ class AniListClient(
     @Volatile private var rateRemaining = Int.MAX_VALUE
     @Volatile private var rateResetMs = 0L
     @Volatile private var rateLimit = DEFAULT_RATE_LIMIT
+    private val studioMediaIdCache = ConcurrentHashMap<Int, List<Int>>()
 
     /** Reserve the next request slot, spacing bursts and backing off as the budget nears zero. */
     private suspend fun awaitRateSlot() {
@@ -99,6 +103,7 @@ class AniListClient(
         title { romaji english native userPreferred }
         coverImage { large extraLarge color }
         bannerImage
+        trailer { thumbnail }
         format
         season
         seasonYear
@@ -109,9 +114,16 @@ class AniListClient(
         popularity
         isAdult
         genres
-        studios(isMain: true) { nodes { name isAnimationStudio } }
+        studios(isMain: true) { nodes { id name isAnimationStudio } }
         nextAiringEpisode { episode airingAt timeUntilAiring }
         startDate { year month day }
+    """.trimIndent()
+
+    // Home's cinematic hero needs a synopsis, while poster rails and relation nodes stay on the
+    // compact field set to keep their payloads small.
+    private val mediaSpotlightFields = """
+        $mediaListFields
+        description(asHtml: false)
     """.trimIndent()
 
     private val mediaFullFields = """
@@ -134,7 +146,7 @@ class AniListClient(
         isAdult
         genres
         tags { name rank isMediaSpoiler isGeneralSpoiler }
-        studios { nodes { name isAnimationStudio } }
+        studios { nodes { id name isAnimationStudio } }
         trailer { id site thumbnail }
         nextAiringEpisode { episode airingAt timeUntilAiring }
         startDate { year month day }
@@ -161,12 +173,14 @@ class AniListClient(
     /** The five Home collections in one GraphQL operation, avoiding a burst on every cold start. */
     suspend fun homeCollections(hideAdult: Boolean = false): HomeCollections = withContext(Dispatchers.IO) {
         val gql = """
-            query (${'$'}isAdult: Boolean) {
+            query (${'$'}isAdult: Boolean, ${'$'}airedBefore: Int) {
               spotlight: Page(page: 1, perPage: 30) {
-                media(type: ANIME, sort: [TRENDING_DESC], isAdult: ${'$'}isAdult) { $mediaListFields }
+                media(type: ANIME, sort: [TRENDING_DESC], isAdult: ${'$'}isAdult) { $mediaSpotlightFields }
               }
-              newest: Page(page: 1, perPage: 30) {
-                media(type: ANIME, status: RELEASING, sort: [START_DATE_DESC], isAdult: ${'$'}isAdult) { $mediaListFields }
+              newest: Page(page: 1, perPage: 50) {
+                airingSchedules(airingAt_lesser: ${'$'}airedBefore, sort: TIME_DESC) {
+                  media { $mediaListFields }
+                }
               }
               popular: Page(page: 1, perPage: 30) {
                 media(type: ANIME, sort: [POPULARITY_DESC], isAdult: ${'$'}isAdult) { $mediaListFields }
@@ -179,11 +193,21 @@ class AniListClient(
               }
             }
         """.trimIndent()
-        val variables = buildJsonObject { if (hideAdult) put("isAdult", false) }
+        val variables = buildJsonObject {
+            if (hideAdult) put("isAdult", false)
+            // airingAt is the broadcast start; allow ~25 min runtime plus an hour for
+            // streaming sites to pick the episode up, so every entry is actually watchable.
+            put("airedBefore", System.currentTimeMillis() / 1000 - NEWEST_AIRED_BUFFER_SEC)
+        }
         val data = json.decodeFromString(GqlHomeCollectionsResponse.serializer(), post(gql, variables)).data
         HomeCollections(
             spotlight = data?.spotlight?.media.orEmpty(),
-            newest = data?.newest?.media.orEmpty(),
+            // Recently aired episodes, newest first; a show airing several times in the
+            // window appears once. isAdult can't be filtered inside airingSchedules.
+            newest = data?.newest?.airingSchedules.orEmpty()
+                .mapNotNull { it.media }
+                .distinctBy { it.id }
+                .filterNot { hideAdult && it.isAdult },
             popular = data?.popular?.media.orEmpty(),
             movies = data?.movies?.media.orEmpty(),
             topRated = data?.topRated?.media.orEmpty(),
@@ -217,6 +241,7 @@ class AniListClient(
               ${'$'}perPage: Int,
               ${'$'}genres: [String],
               ${'$'}tags: [String],
+              ${'$'}mediaIds: [Int],
               ${'$'}year: Int,
               ${'$'}status: MediaStatus,
               ${'$'}format: MediaFormat,
@@ -231,6 +256,7 @@ class AniListClient(
                   type: ANIME,
                   genre_in: ${'$'}genres,
                   tag_in: ${'$'}tags,
+                  id_in: ${'$'}mediaIds,
                   seasonYear: ${'$'}year,
                   status: ${'$'}status,
                   format: ${'$'}format,
@@ -241,21 +267,70 @@ class AniListClient(
               }
             }
         """.trimIndent()
-        val vars = buildJsonObject {
-            filters.query.trim().takeIf { it.isNotEmpty() }?.let { put("search", it) }
-            put("page", page)
-            put("perPage", perPage)
-            if (hideAdult) put("isAdult", false)
-            if (filters.genres.isNotEmpty()) put("genres", buildJsonArray { filters.genres.forEach(::add) })
-            if (filters.tags.isNotEmpty()) put("tags", buildJsonArray { filters.tags.forEach(::add) })
-            filters.year?.let { put("year", it) }
-            filters.status?.let { put("status", it) }
-            filters.format?.let { put("format", it) }
-            // AniList's *_greater filter is exclusive; the UI labels this value as inclusive.
-            filters.minimumScore?.let { put("minimumScore", (it - 1).coerceAtLeast(0)) }
-            put("sort", buildJsonArray { add(filters.sort) })
+        val studioMediaIds = filters.studioId?.takeIf { it > 0 }?.let { mediaIdsForStudio(it) }
+        if (filters.studioId != null && studioMediaIds.isNullOrEmpty()) {
+            return MediaPage(items = emptyList(), hasNextPage = false, page = page)
         }
+        val vars = discoverVariables(filters, page, perPage, hideAdult, studioMediaIds)
         return queryPage(gql, vars, page)
+    }
+
+    /**
+     * AniList has no studio argument on Page.media. Resolve a studio's media IDs through its
+     * connection once, then use Page.media's id_in so every other Browse filter remains server-side.
+     * Twenty 25-item aliases match AniList's public 500-result pagination ceiling in one request.
+     */
+    private suspend fun mediaIdsForStudio(studioId: Int): List<Int> {
+        studioMediaIdCache[studioId]?.let { return it }
+        val pageFields = (1..MAX_STUDIO_MEDIA_PAGES).joinToString("\n") { page ->
+            "p$page: media(page: $page, perPage: $STUDIO_MEDIA_PAGE_SIZE) { nodes { id } }"
+        }
+        val gql = """
+            query (${'$'}studioId: Int) {
+              Studio(id: ${'$'}studioId) {
+                $pageFields
+              }
+            }
+        """.trimIndent()
+        val vars = buildJsonObject { put("studioId", studioId) }
+        val root = json.parseToJsonElement(post(gql, vars)).jsonObject
+        val data = root["data"] as? JsonObject
+        val studio = data?.get("Studio") as? JsonObject
+        val ids = (1..MAX_STUDIO_MEDIA_PAGES)
+            .flatMap { page ->
+                val connection = studio?.get("p$page") as? JsonObject
+                val nodes = connection?.get("nodes") as? JsonArray
+                nodes.orEmpty().mapNotNull { node ->
+                    (node as? JsonObject)?.get("id")?.jsonPrimitive?.intOrNull
+                }
+            }
+            .distinct()
+        studioMediaIdCache.putIfAbsent(studioId, ids)
+        return studioMediaIdCache[studioId].orEmpty()
+    }
+
+    /** Studio suggestions for Browse. AniList media filtering requires the selected studio ID. */
+    suspend fun searchStudios(query: String, perPage: Int = 12): List<StudioNode> = withContext(Dispatchers.IO) {
+        val term = query.trim()
+        if (term.isEmpty()) return@withContext emptyList()
+        val gql = """
+            query (${'$'}search: String, ${'$'}perPage: Int) {
+              Page(page: 1, perPage: ${'$'}perPage) {
+                studios(search: ${'$'}search, sort: [SEARCH_MATCH]) {
+                  id
+                  name
+                  isAnimationStudio
+                }
+              }
+            }
+        """.trimIndent()
+        val vars = buildJsonObject {
+            put("search", term)
+            put("perPage", perPage.coerceIn(1, 25))
+        }
+        json.decodeFromString(GqlStudioPageResponse.serializer(), post(gql, vars))
+            .data?.page?.studios.orEmpty()
+            .filter { it.id > 0 && it.isAnimationStudio && !it.name.isNullOrBlank() }
     }
 
     /** AniList-owned genre and tag catalog, filtered using the user's adult-content setting. */
@@ -280,17 +355,19 @@ class AniListClient(
     suspend fun collection(
         sort: String,
         status: String? = null,
+        format: String? = null,
         page: Int = 1,
         perPage: Int = 20,
         hideAdult: Boolean = false,
     ): MediaPage {
         val statusFilter = if (status != null) ", status: $status" else ""
+        val formatFilter = if (format != null) ", format: $format" else ""
         val adultFilter = if (hideAdult) ", isAdult: false" else ""
         val gql = """
             query (${'$'}page: Int, ${'$'}perPage: Int) {
               Page(page: ${'$'}page, perPage: ${'$'}perPage) {
                 pageInfo { hasNextPage currentPage }
-                media(type: ANIME, sort: [$sort]$statusFilter$adultFilter) { $mediaListFields }
+                media(type: ANIME, sort: [$sort]$statusFilter$formatFilter$adultFilter) { $mediaListFields }
               }
             }
         """.trimIndent()
@@ -336,6 +413,40 @@ class AniListClient(
             }
             all.distinctBy { it.airingAt to it.media?.id }
         }
+
+    /** AniList media for the given MAL ids (one page per 50); unknown ids are simply absent. */
+    suspend fun mediaByMalIds(malIds: List<Int>): List<Media> = withContext(Dispatchers.IO) {
+        val gql = """
+            query (${'$'}ids: [Int]) {
+              Page(page: 1, perPage: 50) {
+                media(type: ANIME, idMal_in: ${'$'}ids) { $mediaListFields }
+              }
+            }
+        """.trimIndent()
+        malIds.distinct().chunked(50).flatMap { chunk ->
+            val vars = buildJsonObject {
+                put("ids", kotlinx.serialization.json.JsonArray(chunk.map { kotlinx.serialization.json.JsonPrimitive(it) }))
+            }
+            json.decodeFromString(GqlPageResponse.serializer(), post(gql, vars)).data?.page?.media.orEmpty()
+        }
+    }
+
+    /** AniList media for the given AniList ids (one page per 50); unknown ids are simply absent. */
+    suspend fun mediaByIds(ids: List<Int>): List<Media> = withContext(Dispatchers.IO) {
+        val gql = """
+            query (${'$'}ids: [Int]) {
+              Page(page: 1, perPage: 50) {
+                media(type: ANIME, id_in: ${'$'}ids) { $mediaListFields }
+              }
+            }
+        """.trimIndent()
+        ids.distinct().chunked(50).flatMap { chunk ->
+            val vars = buildJsonObject {
+                put("ids", kotlinx.serialization.json.JsonArray(chunk.map { kotlinx.serialization.json.JsonPrimitive(it) }))
+            }
+            json.decodeFromString(GqlPageResponse.serializer(), post(gql, vars)).data?.page?.media.orEmpty()
+        }
+    }
 
     suspend fun animeInfo(id: Int): Media? = withContext(Dispatchers.IO) {
         val gql = """
@@ -516,8 +627,13 @@ class AniListClient(
     }
 
     /** Update watched progress without regressing progress or overwriting user-owned list states. */
-    suspend fun syncMediaListProgress(mediaId: Int, progress: Int, totalEpisodes: Int?) = withContext(Dispatchers.IO) {
-        val update = planMediaListProgressUpdate(mediaListEntry(mediaId), progress, totalEpisodes) ?: return@withContext
+    suspend fun syncMediaListProgress(
+        mediaId: Int,
+        progress: Int,
+        totalEpisodes: Int?,
+    ): MediaListProgressUpdate? = withContext(Dispatchers.IO) {
+        val update = planMediaListProgressUpdate(mediaListEntry(mediaId), progress, totalEpisodes)
+            ?: return@withContext null
         val statusDeclaration = if (update.status != null) ", ${'$'}status: MediaListStatus" else ""
         val statusArgument = if (update.status != null) ", status: ${'$'}status" else ""
         val gql = """
@@ -533,6 +649,24 @@ class AniListClient(
             update.status?.let { put("status", it) }
         }
         post(gql, vars, authenticated = true)
+        update
+    }
+
+    /** Move an anime to another standard AniList list while preserving its progress and score. */
+    suspend fun updateMediaListStatus(mediaId: Int, status: String) = withContext(Dispatchers.IO) {
+        require(status in MEDIA_LIST_STATUSES) { "Unsupported AniList status: $status" }
+        val mutation = """
+            mutation (${'$'}mediaId: Int, ${'$'}status: MediaListStatus) {
+              SaveMediaListEntry(mediaId: ${'$'}mediaId, status: ${'$'}status) {
+                id status progress
+              }
+            }
+        """.trimIndent()
+        val variables = buildJsonObject {
+            put("mediaId", mediaId)
+            put("status", status)
+        }
+        post(mutation, variables, authenticated = true)
     }
 
     /**
@@ -675,10 +809,17 @@ class AniListClient(
 
     companion object {
         const val ANILIST_URL = "https://graphql.anilist.co"
+        private val MEDIA_LIST_STATUSES =
+            setOf("CURRENT", "REPEATING", "PLANNING", "PAUSED", "COMPLETED", "DROPPED")
+        private const val MAX_STUDIO_MEDIA_PAGES = 20
+        private const val STUDIO_MEDIA_PAGE_SIZE = 25
         private const val MAX_RATE_LIMIT_RETRIES = 2
         private const val DEFAULT_RETRY_AFTER_SECONDS = 10L
         private const val MAX_FAVOURITE_PAGES = 40
         private const val MAX_SCHEDULE_PAGES = 10
+
+        /** Episode start must be at least this old (~25 min runtime + 1 h for links to appear). */
+        private const val NEWEST_AIRED_BUFFER_SEC = 90L * 60
         private const val SAVED_SYNC_BATCH_SIZE = 10
         private const val USER_AGENT = "Anilili/0.1.14 Android (AniList client 45552)"
     }
@@ -722,7 +863,31 @@ internal fun nextRateSlot(
 }
 
 internal data class MediaListProgressSnapshot(val id: Int, val status: String, val progress: Int)
-internal data class MediaListProgressUpdate(val progress: Int, val status: String?)
+data class MediaListProgressUpdate(val progress: Int, val status: String?)
+
+internal fun discoverVariables(
+    filters: DiscoverFilters,
+    page: Int,
+    perPage: Int,
+    hideAdult: Boolean,
+    studioMediaIds: List<Int>? = null,
+): JsonObject = buildJsonObject {
+    filters.query.trim().takeIf { it.isNotEmpty() }?.let { put("search", it) }
+    put("page", page)
+    put("perPage", perPage)
+    if (hideAdult) put("isAdult", false)
+    if (filters.genres.isNotEmpty()) put("genres", buildJsonArray { filters.genres.forEach(::add) })
+    if (filters.tags.isNotEmpty()) put("tags", buildJsonArray { filters.tags.forEach(::add) })
+    studioMediaIds?.takeIf { it.isNotEmpty() }?.let { ids ->
+        put("mediaIds", buildJsonArray { ids.forEach(::add) })
+    }
+    filters.year?.let { put("year", it) }
+    filters.status?.let { put("status", it) }
+    filters.format?.let { put("format", it) }
+    // AniList's *_greater filter is exclusive; the UI labels this value as inclusive.
+    filters.minimumScore?.let { put("minimumScore", (it - 1).coerceAtLeast(0)) }
+    put("sort", buildJsonArray { add(filters.sort) })
+}
 
 /** Pure policy used by playback sync; null means the user's AniList entry should not be changed. */
 internal fun planMediaListProgressUpdate(

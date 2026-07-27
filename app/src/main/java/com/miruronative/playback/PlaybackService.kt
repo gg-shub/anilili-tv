@@ -2,6 +2,9 @@ package com.miruronative.playback
 
 import android.app.PendingIntent
 import android.content.Intent
+import android.content.res.Configuration
+import android.os.Build
+import android.view.KeyEvent
 import android.webkit.WebSettings
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
@@ -12,8 +15,10 @@ import androidx.media3.common.Player
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.cast.CastPlayer
+import androidx.media3.cast.SessionAvailabilityListener
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cronet.CronetDataSource
@@ -23,6 +28,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.CommandButton
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import com.google.android.gms.cast.framework.CastContext
 import com.miruronative.diagnostics.DiagnosticsLog
 import com.miruronative.MainActivity
 import com.miruronative.ui.nav.Routes
@@ -46,7 +52,7 @@ object PlaybackStatus {
 @OptIn(UnstableApi::class)
 class PlaybackService : MediaSessionService() {
     private lateinit var player: ExoPlayer
-    private lateinit var castPlayer: CastPlayer
+    private var castPlayer: CastPlayer? = null
     private lateinit var session: MediaSession
     private lateinit var httpFactory: HttpDataSource.Factory
 
@@ -69,16 +75,45 @@ class PlaybackService : MediaSessionService() {
             defaultHttpFactory
         }
         activeHttpFactory = httpFactory
+        plainHttpFactory = defaultHttpFactory
+        // Cronet everywhere except sources known to trip it, which fall back to the plain stack.
+        // Both factories are kept configured so the choice can change between episodes.
+        val upstreamDataSource = DataSource.Factory {
+            val factory = if (activeAvoidCronet) defaultHttpFactory else httpFactory
+            factory.createDataSource()
+        }
         val cacheDataSource = CacheDataSource.Factory()
             .setCache(MediaCache.get(this))
-            .setUpstreamDataSourceFactory(httpFactory)
+            .setUpstreamDataSourceFactory(upstreamDataSource)
             .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+        val downloadedOrStreamingDataSource = EpisodeDownloads.readOnlyPlaybackFactory(
+            this,
+            cacheDataSource,
+        )
+        val localAwareDataSource = DefaultDataSource.Factory(this, downloadedOrStreamingDataSource)
         val playbackDataSource = DataSource.Factory {
-            FlixcloudPlaylistDataSource(cacheDataSource.createDataSource()) { activePlaylistKey }
+            FlixcloudPlaylistDataSource(localAwareDataSource.createDataSource()) {
+                activePlaylistKey
+            }
         }
 
+        // Fire TV sticks have ~1GB of RAM and were getting killed by the low-memory killer mid
+        // episode: ExoPlayer's default ~50s buffer of 1080p HLS plus the app's WebViews exceed
+        // what the OS tolerates. A 30s cap keeps the buffer's memory (and network bursts)
+        // proportionate to the device; phones keep the defaults.
+        val isTvDevice = (getSystemService(UI_MODE_SERVICE) as? android.app.UiModeManager)
+            ?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION
+        val loadControl = if (isTvDevice) {
+            androidx.media3.exoplayer.DefaultLoadControl.Builder()
+                .setBufferDurationsMs(10_000, 30_000, 1_500, 3_000)
+                .build()
+        } else {
+            androidx.media3.exoplayer.DefaultLoadControl.Builder().build()
+        }
         player = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(playbackDataSource))
+            .setRenderersFactory(SubtitleDelayRenderersFactory(this))
+            .setLoadControl(loadControl)
             .setSeekBackIncrementMs(10_000)
             .setSeekForwardIncrementMs(10_000)
             .build()
@@ -92,14 +127,98 @@ class PlaybackService : MediaSessionService() {
                 )
                 setHandleAudioBecomingNoisy(true)
             }
-        castPlayer = CastPlayer.Builder(this)
-            .setLocalPlayer(player)
+        // Some Android TV boxes ship a Play Services shell without the cast dynamite module;
+        // CastContext.getSharedInstance throws there ("No acceptable module ... found") and
+        // must not take the whole service down — playback just runs without Cast.
+        castPlayer = runCatching { CastPlayer(CastContext.getSharedInstance(this)) }
+            .onFailure { DiagnosticsLog.throwable("PlaybackService cast unavailable", it) }
+            .getOrNull()
+        activePlayer = player
+        player.addListener(playbackListener(player))
+        castPlayer?.let { it.addListener(playbackListener(it)) }
+
+        val localEpisodeAwarePlayer = episodeAwarePlayer(player)
+
+        // Brand the media notification: Media3's provider handles layout, actions, and artwork
+        // (loading MediaMetadata.artworkUri itself); only the small icon needs overriding.
+        setMediaNotificationProvider(
+            androidx.media3.session.DefaultMediaNotificationProvider.Builder(this)
+                .build()
+                .apply { setSmallIcon(com.miruronative.R.drawable.ic_notification) },
+        )
+        session = MediaSession.Builder(this, localEpisodeAwarePlayer)
+            .setSessionActivity(sessionActivity(null))
+            .setCallback(object : MediaSession.Callback {
+                // A paused-but-loaded session normally resumes on any KEYCODE_MEDIA_PLAY —
+                // including ones a Bluetooth headset or car fires on reconnect, which made
+                // paused audio restart in the background "by itself". While the app is
+                // backgrounded after a lifecycle pause, ignore media-button play; the
+                // notification's own play action arrives as a controller command (not a key
+                // event), so deliberate resumes still work.
+                override fun onMediaButtonEvent(
+                    session: MediaSession,
+                    controllerInfo: MediaSession.ControllerInfo,
+                    intent: Intent,
+                ): Boolean {
+                    val key = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
+                    }
+                    val isResumeKey = key?.keyCode == KeyEvent.KEYCODE_MEDIA_PLAY ||
+                        key?.keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE ||
+                        key?.keyCode == KeyEvent.KEYCODE_HEADSETHOOK
+                    if (isResumeKey && suppressMediaButtonResume && activePlayer?.isPlaying != true) {
+                        DiagnosticsLog.event(
+                            "PlaybackService ignored background media-button resume key=${key?.keyCode}",
+                        )
+                        return true
+                    }
+                    return super.onMediaButtonEvent(session, controllerInfo, intent)
+                }
+            })
             .build()
-            .apply {
-                addListener(object : Player.Listener {
+        session.setMediaButtonPreferences(
+            listOf(
+                CommandButton.Builder(CommandButton.ICON_REWIND)
+                    .setDisplayName("Rewind 10 seconds")
+                    .setPlayerCommand(Player.COMMAND_SEEK_BACK)
+                    .build(),
+                CommandButton.Builder(CommandButton.ICON_FAST_FORWARD)
+                    .setDisplayName("Forward 10 seconds")
+                    .setPlayerCommand(Player.COMMAND_SEEK_FORWARD)
+                    .build(),
+            ),
+        )
+
+        // Media3 1.9 introduced CastPlayer.Builder.setLocalPlayer(), but that release also raised
+        // minSdk to 23. Keep the same local/cast hand-off explicitly so Fire OS 5 (API 22) can use
+        // the player without sacrificing casting on newer devices.
+        castPlayer?.let { cast ->
+            val castEpisodeAwarePlayer = episodeAwarePlayer(cast)
+            cast.setSessionAvailabilityListener(object : SessionAvailabilityListener {
+                override fun onCastSessionAvailable() {
+                    switchPlaybackPlayer(player, cast, castEpisodeAwarePlayer)
+                }
+
+                override fun onCastSessionUnavailable() {
+                    switchPlaybackPlayer(cast, player, localEpisodeAwarePlayer)
+                }
+            })
+        }
+    }
+
+    private fun playbackListener(source: Player): Player.Listener =
+        object : Player.Listener {
                     override fun onIsPlayingChanged(isPlaying: Boolean) {
+                        if (activePlayer !== source) return
                         DiagnosticsLog.event("PlaybackService player isPlaying=$isPlaying")
                         PlaybackStatus.update(isPlaying)
+                        // Any playback that actually starts (notification play, in-app play)
+                        // re-arms the media buttons; the suppression only covers the window
+                        // between the lifecycle pause and the next deliberate start.
+                        if (isPlaying) allowMediaButtonResume()
                     }
 
                     override fun onPlaybackStateChanged(playbackState: Int) {
@@ -107,6 +226,7 @@ class PlaybackService : MediaSessionService() {
                     }
 
                     override fun onDeviceInfoChanged(deviceInfo: DeviceInfo) {
+                        if (activePlayer !== source) return
                         val route = if (deviceInfo.playbackType == DeviceInfo.PLAYBACK_TYPE_REMOTE) {
                             "remote"
                         } else {
@@ -119,10 +239,12 @@ class PlaybackService : MediaSessionService() {
                     }
 
                     override fun onPlayerError(error: PlaybackException) {
+                        if (activePlayer !== source) return
                         DiagnosticsLog.throwable("PlaybackService player error code=${error.errorCodeName}", error)
                     }
 
                     override fun onMediaItemTransition(mediaItem: androidx.media3.common.MediaItem?, reason: Int) {
+                        if (activePlayer !== source) return
                         DiagnosticsLog.event(
                             "PlaybackService media transition reason=$reason " +
                                 "mediaId=${mediaItem?.mediaId?.take(120) ?: "none"}",
@@ -131,15 +253,14 @@ class PlaybackService : MediaSessionService() {
                         val route = mediaItem?.mediaMetadata?.extras?.getString(EXTRA_WATCH_ROUTE)
                         session.setSessionActivity(sessionActivity(route))
                     }
-                })
-            }
-        activePlayer = castPlayer
+                }
 
+    private fun episodeAwarePlayer(delegate: Player): ForwardingPlayer =
         // The playlist holds one media item at a time (episodes resolve lazily, per provider),
         // but the session still advertises next/previous by forwarding them to the app's
         // episode navigator. That lights up Media3's built-in prev/next buttons and makes the
         // media notification and hardware/Bluetooth media keys switch episodes.
-        val episodeAwarePlayer = object : ForwardingPlayer(castPlayer) {
+        object : ForwardingPlayer(delegate) {
             override fun getAvailableCommands(): Player.Commands =
                 super.getAvailableCommands().buildUpon()
                     .addAll(
@@ -181,28 +302,34 @@ class PlaybackService : MediaSessionService() {
             }
         }
 
-        session = MediaSession.Builder(this, episodeAwarePlayer)
-            .setSessionActivity(sessionActivity(null))
-            .build()
-        session.setMediaButtonPreferences(
-            listOf(
-                CommandButton.Builder(CommandButton.ICON_REWIND)
-                    .setDisplayName("Rewind 10 seconds")
-                    .setPlayerCommand(Player.COMMAND_SEEK_BACK)
-                    .build(),
-                CommandButton.Builder(CommandButton.ICON_FAST_FORWARD)
-                    .setDisplayName("Forward 10 seconds")
-                    .setPlayerCommand(Player.COMMAND_SEEK_FORWARD)
-                    .build(),
-            ),
+    private fun switchPlaybackPlayer(from: Player, to: Player, sessionPlayer: Player) {
+        if (activePlayer === to) return
+        val mediaItems = List(from.mediaItemCount) { from.getMediaItemAt(it) }
+        val currentIndex = from.currentMediaItemIndex.coerceIn(0, (mediaItems.size - 1).coerceAtLeast(0))
+        val currentPosition = from.currentPosition.coerceAtLeast(0L)
+        val shouldPlay = from.playWhenReady
+
+        activePlayer = to
+        session.player = sessionPlayer
+        if (mediaItems.isNotEmpty()) {
+            to.setMediaItems(mediaItems, currentIndex, currentPosition)
+            to.prepare()
+            to.playWhenReady = shouldPlay
+        }
+        from.stop()
+        from.clearMediaItems()
+        DiagnosticsLog.event(
+            "PlaybackService switched route=${if (to === castPlayer) "remote" else "local"} " +
+                "items=${mediaItems.size} positionMs=$currentPosition play=$shouldPlay",
         )
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession = session
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        DiagnosticsLog.event("PlaybackService.onTaskRemoved playing=${if (::castPlayer.isInitialized) castPlayer.playWhenReady else false}")
-        if (!::castPlayer.isInitialized || !castPlayer.playWhenReady || castPlayer.mediaItemCount == 0) stopSelf()
+        val active = activePlayer
+        DiagnosticsLog.event("PlaybackService.onTaskRemoved playing=${active?.playWhenReady == true}")
+        if (active?.playWhenReady != true || active.mediaItemCount == 0) stopSelf()
     }
 
     override fun onDestroy() {
@@ -212,11 +339,8 @@ class PlaybackService : MediaSessionService() {
         episodeNavigator = null
         PlaybackStatus.update(false)
         if (::session.isInitialized) session.release()
-        if (::castPlayer.isInitialized) {
-            castPlayer.release()
-        } else if (::player.isInitialized) {
-            player.release()
-        }
+        castPlayer?.release()
+        if (::player.isInitialized) player.release()
         super.onDestroy()
     }
 
@@ -241,6 +365,13 @@ class PlaybackService : MediaSessionService() {
 
         @Volatile
         private var activeHttpFactory: HttpDataSource.Factory? = null
+
+        /** The plain stack, kept alongside Cronet for sources Cronet cannot read. */
+        @Volatile
+        private var plainHttpFactory: HttpDataSource.Factory? = null
+
+        @Volatile
+        private var activeAvoidCronet: Boolean = false
         @Volatile
         private var activeUserAgent: String = FALLBACK_PLAYER_USER_AGENT
         @Volatile
@@ -265,6 +396,9 @@ class PlaybackService : MediaSessionService() {
             }
         }
 
+        @Volatile
+        private var suppressMediaButtonResume = false
+
         /** Pause playback when the app is backgrounded while keeping the current media loaded. */
         fun pauseActivePlayback() {
             DiagnosticsLog.event("PlaybackService.pauseActivePlayback")
@@ -274,11 +408,32 @@ class PlaybackService : MediaSessionService() {
                 return
             }
             active.pause()
+            // The media stays loaded so the notification can resume it, but stray media-button
+            // events (Bluetooth reconnects) must not restart it while the app is away.
+            suppressMediaButtonResume = true
+        }
+
+        fun resumeActivePlayback() {
+            DiagnosticsLog.event("PlaybackService.resumeActivePlayback")
+            val active = activePlayer ?: return
+            active.play()
+            allowMediaButtonResume()
+        }
+
+        /** The app is visible again (or playback deliberately restarted): buttons act normally. */
+        fun allowMediaButtonResume() {
+            suppressMediaButtonResume = false
         }
 
         /** Applies per-provider headers before Media3 creates manifest and segment data sources. */
-        fun configureRequestHeaders(referer: String?, playlistKey: String?) {
+        fun configureRequestHeaders(
+            referer: String?,
+            playlistKey: String?,
+            extraHeaders: Map<String, String> = emptyMap(),
+            avoidCronet: Boolean = false,
+        ) {
             activePlaylistKey = playlistKey
+            activeAvoidCronet = avoidCronet
             val safeReferer = referer ?: "https://www.miruro.to/"
             val refererUri = android.net.Uri.parse(safeReferer)
             val origin = refererUri.let { uri ->
@@ -300,13 +455,17 @@ class PlaybackService : MediaSessionService() {
                     "X-Requested-With" to "com.miruronative",
                 )
             }
-            activeHttpFactory?.setDefaultRequestProperties(
-                headers,
-            )
+            // Provider-supplied last so a stream that carries its own auth token wins over the
+            // defaults derived from the referer.
+            headers += extraHeaders
+            // Both stacks stay configured; the upstream factory picks between them per stream.
+            activeHttpFactory?.setDefaultRequestProperties(headers)
+            plainHttpFactory?.setDefaultRequestProperties(headers)
             DiagnosticsLog.event(
                 "PlaybackService.configureRequestHeaders " +
                     "refererHost=${android.net.Uri.parse(safeReferer).host ?: "unknown"} " +
-                    "playlistKey=${playlistKey != null}",
+                    "playlistKey=${playlistKey != null} extraHeaders=${extraHeaders.keys.sorted()} " +
+                    "avoidCronet=$avoidCronet",
             )
         }
     }

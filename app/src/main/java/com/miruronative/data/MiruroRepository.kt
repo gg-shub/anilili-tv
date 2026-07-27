@@ -7,19 +7,35 @@ import com.miruronative.data.model.EpisodesResult
 import com.miruronative.data.model.DiscoverFilters
 import com.miruronative.data.model.Media
 import com.miruronative.data.model.MediaPage
+import com.miruronative.data.model.StudioNode
 import com.miruronative.data.model.HomeCollections
 import com.miruronative.data.model.SourcesResult
 import com.miruronative.data.cache.AppCache
+import com.miruronative.data.remote.searchHanimeCatalogue
+import com.miruronative.data.auth.AccountService
 import com.miruronative.data.auth.AuthManager
 import com.miruronative.data.model.DiscoverOptions
 import com.miruronative.data.model.SkipTimes
+import com.miruronative.data.model.AnimeStat
+import com.miruronative.data.model.MediaListEntry
+import com.miruronative.data.model.UserAvatar
+import com.miruronative.data.model.Viewer
+import com.miruronative.data.model.ViewerStatistics
 import com.miruronative.data.remote.AniListClient
 import com.miruronative.data.remote.AniSkipClient
 import com.miruronative.data.remote.AnivexaClient
 import com.miruronative.data.remote.JikanClient
+import com.miruronative.data.remote.KonohaClient
+import com.miruronative.data.remote.KonohaEpisode
+import com.miruronative.data.remote.MalClient
+import com.miruronative.data.remote.MediaListProgressSnapshot
+import com.miruronative.data.remote.MediaListProgressUpdate
 import com.miruronative.data.remote.PipeClient
+import com.miruronative.data.remote.planMediaListProgressUpdate
 import com.miruronative.data.settings.SettingsStore
+import com.miruronative.data.settings.DEFAULT_PREFERRED_PROVIDER
 import com.miruronative.diagnostics.DiagnosticsLog
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -27,6 +43,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.SetSerializer
 import kotlinx.serialization.builtins.nullable
@@ -36,19 +53,107 @@ import kotlinx.serialization.builtins.serializer
  * Keeps fallback attempts spread across independent backends. Providers from one backend often
  * fail together, so exhausting the attempt budget on adjacent aliases defeats fallback entirely.
  */
-internal fun providerAttemptOrder(preferred: String, providerNames: List<String>): List<String> {
-    val available = (listOf(preferred) + providerNames.sortedBy { ProviderCatalog.sortKey(it) }).distinct()
+/**
+ * The order servers are tried in for one episode.
+ *
+ * [preferred] goes first, then any [fallbacks] the user picked in Settings, and only then the
+ * catalog's own alternating order. Entries that are blank, "auto", duplicated, or equal to
+ * [preferred] are dropped, so a half-filled pair of fallback slots behaves like none at all.
+ */
+internal fun providerAttemptOrder(
+    preferred: String,
+    providerNames: List<String>,
+    fallbacks: List<String> = emptyList(),
+): List<String> {
+    val chosen = buildList {
+        add(preferred)
+        fallbacks.forEach { fallback ->
+            val name = fallback.trim().lowercase()
+            if (name.isNotBlank() && name != DEFAULT_PREFERRED_PROVIDER && name !in this) add(name)
+        }
+    }
+    val available = (chosen + providerNames.sortedBy { ProviderCatalog.sortKey(it) }).distinct()
     val preferredSource = ProviderCatalog.sourceOf(preferred)
-    val sameSource = available.filter { it != preferred && ProviderCatalog.sourceOf(it) == preferredSource }
-    val otherSource = available.filter { ProviderCatalog.sourceOf(it) != preferredSource }
+    val rest = available.filterNot { it in chosen }
+    val sameSource = rest.filter { ProviderCatalog.sourceOf(it) == preferredSource }
+    val otherSource = rest.filter { ProviderCatalog.sourceOf(it) != preferredSource }
 
     return buildList {
-        add(preferred)
+        addAll(chosen)
         repeat(maxOf(sameSource.size, otherSource.size)) { index ->
             otherSource.getOrNull(index)?.let(::add)
             sameSource.getOrNull(index)?.let(::add)
         }
     }
+}
+
+internal data class ProviderSourceCandidate(
+    val provider: String,
+    val pipeId: String,
+)
+
+internal data class ProviderSourceResult(
+    val sources: SourcesResult,
+    val provider: String,
+)
+
+internal data class ProviderCandidateResolution(
+    val resolved: ProviderSourceResult?,
+    val unavailableProviders: Set<String>,
+)
+
+/**
+ * Runs source providers in preference order without allowing one dead host to stop fallback.
+ * The loader must cooperate with cancellation; Anivexa's HTTP bridge does so by cancelling the
+ * underlying OkHttp call, while its legacy synchronous providers also have a short call timeout.
+ */
+internal suspend fun resolveProviderCandidates(
+    candidates: List<ProviderSourceCandidate>,
+    excludedProviders: Set<String>,
+    maxAttempts: Int,
+    attemptTimeoutMs: Long,
+    onAttempt: (String) -> Unit = {},
+    onFailure: (String, Exception) -> Unit = { _, _ -> },
+    onTimeout: (String) -> Unit = {},
+    onEmpty: (String) -> Unit = {},
+    load: suspend (ProviderSourceCandidate) -> SourcesResult,
+): ProviderCandidateResolution {
+    require(maxAttempts >= 0) { "maxAttempts must not be negative" }
+    require(attemptTimeoutMs > 0L) { "attemptTimeoutMs must be positive" }
+
+    val unavailable = linkedSetOf<String>()
+    var attempts = 0
+    for (candidate in candidates) {
+        if (attempts >= maxAttempts) break
+        if (candidate.provider in excludedProviders) continue
+        attempts++
+        onAttempt(candidate.provider)
+
+        val result = try {
+            withTimeoutOrNull(attemptTimeoutMs) { load(candidate) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            unavailable += candidate.provider
+            onFailure(candidate.provider, e)
+            continue
+        }
+        if (result == null) {
+            unavailable += candidate.provider
+            onTimeout(candidate.provider)
+            continue
+        }
+
+        if (result.streams.isNotEmpty()) {
+            return ProviderCandidateResolution(
+                resolved = ProviderSourceResult(result, candidate.provider),
+                unavailableProviders = unavailable,
+            )
+        }
+        unavailable += candidate.provider
+        onEmpty(candidate.provider)
+    }
+    return ProviderCandidateResolution(resolved = null, unavailableProviders = unavailable)
 }
 
 /**
@@ -61,6 +166,8 @@ class MiruroRepository(
     private val anivexa: AnivexaClient,
     private val jikan: JikanClient,
     private val aniSkip: AniSkipClient,
+    private val mal: MalClient,
+    private val konoha: KonohaClient,
     private val cache: AppCache,
 ) {
     /** User preference: keep hentai out of every browsing surface. */
@@ -74,7 +181,7 @@ class MiruroRepository(
     suspend fun homeCollections(force: Boolean = false): HomeCollections {
         val adultHidden = hideAdult
         val collections = cache.getOrFetch(
-            key = "home:v1:${if (adultHidden) "sfw" else "all"}",
+            key = "home:v3:${if (adultHidden) "sfw" else "all"}",
             serializer = HomeCollections.serializer(),
             ttlMs = HOME_TTL,
             forceRefresh = force,
@@ -97,6 +204,9 @@ class MiruroRepository(
     }
     suspend fun topRated(page: Int = 1, force: Boolean = false): MediaPage = mediaPage("top:$page", COLLECTION_TTL, force) {
         aniList.collection("SCORE_DESC", page = page, perPage = 30, hideAdult = hideAdult)
+    }
+    suspend fun movies(page: Int = 1, force: Boolean = false): MediaPage = mediaPage("movies:$page", COLLECTION_TTL, force) {
+        aniList.collection("POPULARITY_DESC", format = "MOVIE", page = page, perPage = 30, hideAdult = hideAdult)
     }
     suspend fun recentlyReleased(page: Int = 1, force: Boolean = false): MediaPage =
         mediaPage("recent:$page", AIRING_TTL, force) {
@@ -123,11 +233,46 @@ class MiruroRepository(
         return if (hideAdult) schedules.filterNot { it.media?.isAdult == true } else schedules
     }
 
-    suspend fun search(query: String, page: Int = 1, force: Boolean = false): MediaPage =
-        mediaPage("search:${query.trim().lowercase()}:$page", SEARCH_TTL, force) { aniList.search(query, page, hideAdult = hideAdult) }
+    suspend fun search(query: String, page: Int = 1, force: Boolean = false): MediaPage {
+        val remote = mediaPage("search:${query.trim().lowercase()}:$page", SEARCH_TTL, force) {
+            aniList.search(query, page, hideAdult = hideAdult)
+        }
+        return remote.copy(items = withHanimeResults(query, remote.items, page))
+    }
+
+    /**
+     * Refresh the hanime library against the network. A snapshot ships in the APK so search works
+     * from the first launch, but hanime keeps releasing — without this the app would only ever
+     * know the titles that existed when the release was cut.
+     */
+    suspend fun warmHanimeCatalogue() {
+        if (hideAdult) return
+        anivexa.refreshHanimeCatalogue()
+    }
+
+    /**
+     * hanime's library is held on the device, so its hits are folded into ordinary search results
+     * rather than living behind a section of their own. They are tagged adult, which is why this
+     * only runs once the viewer has turned adult content on, and only on the first page — the
+     * catalogue is searched whole, so there is nothing further to page through.
+     */
+    private suspend fun withHanimeResults(query: String, remote: List<Media>, page: Int): List<Media> {
+        if (hideAdult || page != 1 || query.isBlank()) return remote
+        val catalogue = runCatching { anivexa.hanimeCatalogue() }.getOrElse {
+            DiagnosticsLog.throwable("Hanime catalogue unavailable for search", it)
+            return remote
+        }
+        val hits = searchHanimeCatalogue(query, catalogue)
+        if (hits.isEmpty()) return remote
+        DiagnosticsLog.event("Hanime search hits=${hits.size} query=${query.take(40)}")
+        // AniList first: a plain title search should still lead with the mainstream match.
+        return (remote + hits).distinctBy { it.id }
+    }
 
     suspend fun discover(filters: DiscoverFilters, page: Int = 1, force: Boolean = false): MediaPage =
         mediaPage("discover:${filters.cacheKey()}:$page", COLLECTION_TTL, force) { aniList.discover(filters, page, hideAdult = hideAdult) }
+
+    suspend fun searchStudios(query: String): List<StudioNode> = aniList.searchStudios(query)
 
     suspend fun discoverOptions(): DiscoverOptions {
         val adultHidden = hideAdult
@@ -140,15 +285,187 @@ class MiruroRepository(
 
     // ---- authenticated (AniList login) ----
     suspend fun viewer() = aniList.viewer()
+    suspend fun mediaByMalIds(malIds: List<Int>) = aniList.mediaByMalIds(malIds)
     suspend fun notifications(markAllRead: Boolean = false) = aniList.notifications(markAllRead)
     suspend fun favouriteAnime() = aniList.favouriteAnime()
     suspend fun userAnimeList(userId: Int) = aniList.userAnimeList(userId)
     suspend fun saveAniListProgress(mediaId: Int, progress: Int, totalEpisodes: Int?) =
         aniList.syncMediaListProgress(mediaId, progress, totalEpisodes)
     suspend fun syncSavedAnime(mediaId: Int, saved: Boolean) = aniList.syncSavedAnime(mediaId, saved)
+
+    /** Move one title on whichever anime-list service is currently signed in. */
+    suspend fun updateAnimeListStatus(anilistId: Int, status: String) {
+        require(status in LIST_STATUSES) { "Unsupported anime list status: $status" }
+        val service = AccountService.active ?: error("Sign in to AniList or MyAnimeList first")
+        when (service) {
+            AccountService.ANILIST -> aniList.updateMediaListStatus(anilistId, status)
+            AccountService.MAL -> {
+                val malId = animeInfo(anilistId)?.idMal?.takeIf { it > 0 }
+                    ?: error("This anime could not be matched to MyAnimeList")
+                mal.updateListStatus(
+                    malId,
+                    status = MalClient.malStatus(status),
+                    isRewatching = status == "REPEATING",
+                )
+            }
+        }
+        DiagnosticsLog.event("${service.label} status moved id=$anilistId status=$status")
+    }
+
     suspend fun syncSavedAnime(mediaIds: Collection<Int>) {
         val viewerId = AuthManager.viewerId() ?: aniList.viewer()?.id ?: return
         aniList.syncSavedAnime(mediaIds, viewerId)
+    }
+
+    // ---- authenticated (MyAnimeList login) ----
+
+    /** The MAL account shaped like an AniList [Viewer] so the profile UI stays shared. */
+    suspend fun malViewer(): Viewer {
+        val user = mal.viewer()
+        val stats = user.animeStatistics
+        return Viewer(
+            id = user.id,
+            name = user.name,
+            avatar = UserAvatar(large = user.picture),
+            bannerImage = null,
+            createdAt = user.joinedAt?.let { raw ->
+                runCatching { java.time.OffsetDateTime.parse(raw).toEpochSecond() }.getOrNull()
+            },
+            statistics = ViewerStatistics(
+                anime = AnimeStat(
+                    count = stats?.numItems ?: 0,
+                    minutesWatched = ((stats?.numDaysWatched ?: 0.0) * 1440).toLong(),
+                    meanScore = stats?.meanScore ?: 0.0,
+                ),
+            ),
+        )
+    }
+
+    /**
+     * The MAL anime list as AniList-shaped [MediaListEntry]s. MAL ids are joined back to
+     * AniList media in day-cached batches of 50; the odd title AniList doesn't know is dropped.
+     */
+    suspend fun malAnimeList(): List<MediaListEntry> = coroutineScope {
+        val entries = mal.animeList()
+        val malIds = entries.map { it.malId }.distinct()
+        val mapGate = Semaphore(10)
+
+        // 1. Resolve MAL IDs to AniList IDs via Konoha sharded CDN mappings in parallel
+        val deferredMappings = malIds.map { malId ->
+            async {
+                mapGate.withPermit {
+                    val anilistId = runCatching { konoha.resolveAnilistIdFromMal(malId) }.getOrNull()
+                    malId to anilistId
+                }
+            }
+        }
+        val resolvedMap = deferredMappings.awaitAll().toMap()
+        
+        val mappedAnilistIds = resolvedMap.values.filterNotNull().distinct()
+        val unmappedMalIds = resolvedMap.filter { it.value == null }.keys.toList()
+
+        val byMalId = mutableMapOf<Int, Media>()
+
+        // 2. Fetch Media details for resolved AniList IDs in chunks
+        if (mappedAnilistIds.isNotEmpty()) {
+            mappedAnilistIds.sorted().chunked(50).forEach { chunk ->
+                cache.getOrFetch(
+                    key = "anilist_batch:v1:${chunk.hashCode()}",
+                    serializer = ListSerializer(Media.serializer()),
+                    ttlMs = MAL_MAP_TTL,
+                ) { aniList.mediaByIds(chunk) }
+                    .forEach { media ->
+                        media.idMal?.let { byMalId[it] = media }
+                        
+                        // Fallback mapping matching in case Media's internal idMal is incorrect/missing
+                        val malId = resolvedMap.filter { it.value == media.id }.keys.firstOrNull()
+                        if (malId != null) {
+                            byMalId[malId] = media
+                        }
+                    }
+            }
+        }
+
+        // 3. Fallback: Query AniList directly for any IDs that failed to map in Konoha
+        if (unmappedMalIds.isNotEmpty()) {
+            unmappedMalIds.sorted().chunked(50).forEach { chunk ->
+                cache.getOrFetch(
+                    key = "malmap:v1:${chunk.hashCode()}",
+                    serializer = ListSerializer(Media.serializer()),
+                    ttlMs = MAL_MAP_TTL,
+                ) { aniList.mediaByMalIds(chunk) }
+                    .forEach { media -> media.idMal?.let { byMalId[it] = media } }
+            }
+        }
+
+        // 4. Return reconstructed entries
+        entries.mapNotNull { entry ->
+            val media = byMalId[entry.malId] ?: return@mapNotNull null
+            MediaListEntry(
+                id = entry.malId,
+                progress = entry.progress,
+                score = entry.score,
+                status = entry.status,
+                media = media,
+            )
+        }
+    }
+
+    /** Mirrors the device Save button on MAL without damaging an existing list state. */
+    suspend fun malSyncSavedAnime(anilistId: Int, saved: Boolean) {
+        val malId = animeInfo(anilistId)?.idMal?.takeIf { it > 0 }
+        if (malId == null) {
+            DiagnosticsLog.event("MAL saved sync skipped id=$anilistId: no MAL id on AniList")
+            return
+        }
+        val current = mal.listStatus(malId)
+        when {
+            saved && current == null -> {
+                mal.updateListStatus(malId, status = "plan_to_watch")
+                DiagnosticsLog.event("MAL saved sync added malId=$malId (id=$anilistId)")
+            }
+            !saved && current?.status == "plan_to_watch" -> {
+                mal.deleteListEntry(malId)
+                DiagnosticsLog.event("MAL saved sync removed malId=$malId (id=$anilistId)")
+            }
+            else -> DiagnosticsLog.event(
+                "MAL saved sync no-op malId=$malId (id=$anilistId) saved=$saved currentStatus=${current?.status}",
+            )
+        }
+    }
+
+    /** Batch push: one list fetch, then add only the titles MAL doesn't have yet. */
+    suspend fun malSyncSavedAnime(anilistIds: Collection<Int>) {
+        if (anilistIds.isEmpty()) return
+        val onMal = mal.animeList().map { it.malId }.toSet()
+        anilistIds.forEach { id ->
+            runCatching {
+                val malId = animeInfo(id)?.idMal?.takeIf { it > 0 }
+                when {
+                    malId == null -> DiagnosticsLog.event("MAL saved sync skipped id=$id: no MAL id on AniList")
+                    malId !in onMal -> {
+                        mal.updateListStatus(malId, status = "plan_to_watch")
+                        DiagnosticsLog.event("MAL saved sync added malId=$malId (id=$id)")
+                    }
+                }
+            }.onFailure { DiagnosticsLog.throwable("MAL saved sync failed id=$id", it) }
+        }
+    }
+
+    /** Update MAL watched progress with the same non-regression policy as the AniList sync. */
+    suspend fun saveMalProgress(
+        anilistId: Int,
+        progress: Int,
+        totalEpisodes: Int?,
+    ): MediaListProgressUpdate? {
+        val media = animeInfo(anilistId)
+        val malId = media?.idMal?.takeIf { it > 0 } ?: return null
+        val current = mal.listStatus(malId)?.let {
+            MediaListProgressSnapshot(id = malId, status = MalClient.anilistStatus(it), progress = it.numEpisodesWatched)
+        }
+        val update = planMediaListProgressUpdate(current, progress, totalEpisodes ?: media.episodes) ?: return null
+        mal.updateListStatus(malId, progress = update.progress, status = update.status?.let(MalClient::malStatus))
+        return update
     }
 
     /** MAL filler episode numbers via Jikan; cached a week, empty on failure or no MAL id. */
@@ -173,14 +490,56 @@ class MiruroRepository(
     }
 
     suspend fun animeInfo(id: Int, force: Boolean = false): Media? = cache.getOrFetch(
-        key = "anime:v3:$id",
+        key = "anime:v4:$id",
         serializer = Media.serializer().nullable,
         ttlMs = INFO_TTL,
         forceRefresh = force,
     ) { aniList.animeInfo(id) }
 
+    /**
+     * Konoha CDN episode metadata (episode titles, TMDB stills); empty when unknown or on failure.
+     *
+     * Skipped for adult titles. Konoha's data is TMDB-derived and TMDB does not index hentai, so a
+     * hit on an adult AniList id is a false positive: it returns some unrelated show's episodes and
+     * cover stills — a 1930s period drama's, in one measured case — which then decorate a hentai
+     * episode list. Better no metadata than another title's. Non-adult titles are unaffected.
+     */
+    suspend fun konohaEpisodes(anilistId: Int): List<KonohaEpisode> {
+        // Catalogue-native entries (hanime) use negative ids: no AniList record to check and no
+        // Konoha entry, so skip the lookup — and the doomed animeInfo call a negative id would make.
+        if (anilistId < 0) return emptyList()
+        if (animeInfo(anilistId)?.isAdult == true) {
+            DiagnosticsLog.event("Konoha skipped for adult title id=$anilistId (TMDB has no hentai)")
+            return emptyList()
+        }
+        return runCatching { konoha.episodes(anilistId) }
+            .onFailure { DiagnosticsLog.throwable("Konoha episodes failed id=$anilistId", it) }
+            .getOrDefault(emptyList())
+    }
+
     /** Walks AniList's PREQUEL/SEQUEL chain so every season is reachable from one detail page. */
-    suspend fun animeSeries(root: Media): List<Media> = coroutineScope {
+    suspend fun animeSeries(root: Media): List<Media> {
+        // Season chains change rarely, so the walked chain's ids are cached under EVERY member
+        // id: whichever season's page the user opens, the full series hydrates instantly from
+        // the animeInfo cache (filled during the walk) instead of re-walking AniList relations.
+        val idsSerializer = ListSerializer(Int.serializer())
+        cache.getIfFresh("$SERIES_KEY_PREFIX${root.id}", idsSerializer)?.let { ids ->
+            val members = ids.mapNotNull { id ->
+                if (id == root.id) root else runCatching { animeInfo(id) }.getOrNull()
+            }
+            if (members.isNotEmpty()) {
+                val withRoot = if (members.none { it.id == root.id }) members + root else members
+                return withRoot.sortedWith(SERIES_AIRING_ORDER)
+            }
+        }
+
+        val chain = walkSeriesChain(root)
+        val payload = kotlinx.serialization.json.Json.encodeToString(idsSerializer, chain.map(Media::id))
+        cache.putBatch(chain.associate { "$SERIES_KEY_PREFIX${it.id}" to payload }, INFO_TTL)
+        return chain
+    }
+
+    private suspend fun walkSeriesChain(root: Media): List<Media> = coroutineScope {
         val found = linkedMapOf(root.id to root)
         val expanded = mutableSetOf<Int>()
         var frontier = listOf(root)
@@ -217,14 +576,7 @@ class MiruroRepository(
             depth++
         }
 
-        found.values.sortedWith(
-            compareBy<Media>(
-                { it.startDate?.year ?: it.seasonYear ?: Int.MAX_VALUE },
-                { it.startDate?.month ?: Int.MAX_VALUE },
-                { it.startDate?.day ?: Int.MAX_VALUE },
-                { it.id },
-            ),
-        )
+        found.values.sortedWith(SERIES_AIRING_ORDER)
     }
 
     // ---- streaming (two backends, cached per source) ----
@@ -245,11 +597,17 @@ class MiruroRepository(
         // Fetched here (outside the episodes cache lock — the striped mutexes are not reentrant) so
         // the Anivexa catalog reuses the shared AniList Media instead of re-requesting it itself.
         val seed = runCatching { animeInfo(anilistId) }.getOrNull()
+        val expected = ProviderCatalog.anivexaProvidersFor(hideAdult).size
         return cache.getOrFetch(
             key = "episodes:v4:anivexa:$anilistId",
             serializer = EpisodesResult.serializer(),
             ttlMs = EPISODES_TTL,
             forceRefresh = force,
+            // A catalog assembled while the network was struggling is missing the providers that
+            // timed out, and caching it pinned that thin list for two hours — users reported "no
+            // sources" on titles with plenty, and clearing app data was the only way out. Use the
+            // result now, but only remember it if enough of the catalog actually answered.
+            cacheIf = { it.providers.size >= (expected * MIN_CATALOG_COVERAGE).toInt() },
         ) {
             anivexa.getEpisodes(anilistId, seed).also {
                 check(!it.isEmpty) { "Anivexa returned no episode providers" }
@@ -275,6 +633,34 @@ class MiruroRepository(
         return EpisodesResult(providers.map { it.copy(sub = mark(it.sub), dub = mark(it.dub)) })
     }
 
+    /**
+     * Quick partial Anivexa catalog: just the fast API-backed providers (plus [extraProviders]
+     * when the user's preferred server is a slower one), so the watch screen can start playback
+     * without waiting for every scraper. The full catalog still loads separately and replaces
+     * these entries via [mergeProviders].
+     */
+    suspend fun fastAnivexaEpisodes(anilistId: Int, extraProviders: Set<String> = emptySet()): EpisodesResult {
+        val providers = (
+            ProviderCatalog.fastAnivexaProviders +
+                extraProviders.filter { it in ProviderCatalog.anivexaProviders }
+            ).distinct()
+        val seed = runCatching { animeInfo(anilistId) }.getOrNull()
+        return cache.getOrFetch(
+            key = "episodes:v4:anivexa-fast:${providers.sorted().joinToString(",")}:$anilistId",
+            serializer = EpisodesResult.serializer(),
+            ttlMs = EPISODES_TTL,
+        ) {
+            anivexa.getEpisodes(
+                anilistId = anilistId,
+                seedMedia = seed,
+                providers = providers,
+                providerTimeoutMs = FAST_CATALOG_PROVIDER_TIMEOUT_MS,
+            ).also {
+                check(!it.isEmpty) { "Fast providers returned no episodes" }
+            }
+        }.withFillerMarks(anilistId)
+    }
+
     /** Merged view of both sources — used where the full provider list is needed (watch screen). */
     suspend fun episodes(anilistId: Int): EpisodesResult = coroutineScope {
         val miruro = async {
@@ -290,8 +676,14 @@ class MiruroRepository(
         mergeProviders(miruro.await(), anivexa.await())
     }
 
-    fun mergeProviders(a: EpisodesResult, b: EpisodesResult): EpisodesResult =
-        EpisodesResult((a.providers + b.providers).sortedBy { ProviderCatalog.sortKey(it.name) })
+    /** Providers present in both lists keep [b]'s entry (the fresher, fuller catalog). */
+    fun mergeProviders(a: EpisodesResult, b: EpisodesResult): EpisodesResult {
+        val replaced = b.providerNames.toSet()
+        return EpisodesResult(
+            (a.providers.filterNot { it.name in replaced } + b.providers)
+                .sortedBy { ProviderCatalog.sortKey(it.name) },
+        )
+    }
 
     suspend fun sources(
         pipeId: String,
@@ -304,6 +696,12 @@ class MiruroRepository(
     }
 
     data class ResolvedSources(val sources: SourcesResult, val provider: String)
+
+    /** Includes catalog matches that were checked but returned no playable streams. */
+    data class SourceResolution(
+        val resolved: ResolvedSources?,
+        val unavailableProviders: Set<String>,
+    )
 
     /**
      * Resolve a playable stream for [number] within the supplied [episodes] catalog, trying
@@ -320,34 +718,54 @@ class MiruroRepository(
         episodes: EpisodesResult,
         excludedProviders: Set<String> = emptySet(),
         maxAttempts: Int = 5,
-    ): ResolvedSources? {
-        val ordered = providerAttemptOrder(preferred, episodes.providerNames)
-
-        var attempts = 0
-        for (name in ordered) {
-            if (attempts >= maxAttempts) break
-            if (name in excludedProviders) continue
-            val provider = episodes.provider(name) ?: continue
-            val ep = provider.episodes(category).firstOrNull { it.number == number } ?: continue
-            attempts++
-            val result = runCatching { sources(ep.pipeId, name, category, anilistId) }
-                .onFailure {
-                    DiagnosticsLog.throwable(
-                        "Source resolve failed provider=$name id=$anilistId episode=$number",
-                        it,
-                    )
-                }
-                .getOrNull()
-            if (result != null && result.streams.isNotEmpty()) {
-                return ResolvedSources(result, name)
-            }
-            if (result != null) {
-                DiagnosticsLog.event(
-                    "Source resolve empty provider=$name id=$anilistId episode=$number",
-                )
-            }
+    ): SourceResolution {
+        val ordered = providerAttemptOrder(
+            preferred = preferred,
+            providerNames = episodes.providerNames,
+            // Everything the user ranked behind their first choice, in their order.
+            fallbacks = SettingsStore.serverPriority.value.drop(1),
+        )
+        val candidates = ordered.mapNotNull { name ->
+            val provider = episodes.provider(name) ?: return@mapNotNull null
+            val episode = provider.episodes(category).firstOrNull { it.number == number }
+                ?: return@mapNotNull null
+            ProviderSourceCandidate(name, episode.pipeId)
         }
-        return null
+        val resolution = resolveProviderCandidates(
+            candidates = candidates,
+            excludedProviders = excludedProviders,
+            maxAttempts = maxAttempts,
+            attemptTimeoutMs = PROVIDER_SOURCE_ATTEMPT_TIMEOUT_MS,
+            onAttempt = { provider ->
+                DiagnosticsLog.event(
+                    "Source resolve attempt provider=$provider id=$anilistId episode=$number " +
+                        "timeoutMs=$PROVIDER_SOURCE_ATTEMPT_TIMEOUT_MS",
+                )
+            },
+            onFailure = { provider, error ->
+                DiagnosticsLog.throwable(
+                    "Source resolve failed provider=$provider id=$anilistId episode=$number",
+                    error,
+                )
+            },
+            onTimeout = { provider ->
+                DiagnosticsLog.event(
+                    "Source resolve timeout provider=$provider id=$anilistId episode=$number " +
+                        "afterMs=$PROVIDER_SOURCE_ATTEMPT_TIMEOUT_MS",
+                )
+            },
+            onEmpty = { provider ->
+                DiagnosticsLog.event(
+                    "Source resolve empty provider=$provider id=$anilistId episode=$number",
+                )
+            },
+        ) { candidate ->
+            sources(candidate.pipeId, candidate.provider, category, anilistId)
+        }
+        return SourceResolution(
+            resolved = resolution.resolved?.let { ResolvedSources(it.sources, it.provider) },
+            unavailableProviders = resolution.unavailableProviders,
+        )
     }
 
     private suspend fun mediaPage(
@@ -373,6 +791,7 @@ class MiruroRepository(
         query.trim().lowercase(),
         genres.sorted().joinToString(","),
         tags.sorted().joinToString(","),
+        studioId.orEmpty(),
         year.orEmpty(),
         status.orEmpty(),
         format.orEmpty(),
@@ -383,20 +802,42 @@ class MiruroRepository(
     private fun Any?.orEmpty(): String = this?.toString() ?: ""
 
     private companion object {
+        val LIST_STATUSES =
+            setOf("CURRENT", "REPEATING", "PLANNING", "PAUSED", "COMPLETED", "DROPPED")
         const val MAX_SERIES_ENTRIES = 16
         const val MAX_SERIES_DEPTH = 8
         const val SERIES_FETCH_CONCURRENCY = 2
         const val SCHEDULE_TTL = 15L * 60 * 1000
         const val HOME_TTL = 30L * 60 * 1000
+        /** MAL id → AniList media join; ids never remap, so a day is conservative. */
+        const val MAL_MAP_TTL = 24L * 60 * 60 * 1000
         const val SEARCH_TTL = 30L * 60 * 1000
         const val AIRING_TTL = 30L * 60 * 1000
         const val COLLECTION_TTL = 4L * 60 * 60 * 1000
         const val EPISODES_TTL = 2L * 60 * 60 * 1000
+
+        /**
+         * Fraction of the Anivexa catalog that must answer before the result is worth caching.
+         * Half is deliberately lenient: providers genuinely lack titles all the time, and the
+         * target is the degraded-network case where nearly everything times out at once.
+         */
+        const val MIN_CATALOG_COVERAGE = 0.5
         const val FILLER_FETCH_TIMEOUT_MS = 3_500L
+        const val FAST_CATALOG_PROVIDER_TIMEOUT_MS = 6_000L
+        const val PROVIDER_SOURCE_ATTEMPT_TIMEOUT_MS = 8_000L
         const val INFO_TTL = 24L * 60 * 60 * 1000
         const val OPTIONS_TTL = 7L * 24 * 60 * 60 * 1000
+        const val SERIES_KEY_PREFIX = "series:v1:"
     }
 }
+
+/** Chronological airing order shared by the series walk and the instant relation-based seed. */
+internal val SERIES_AIRING_ORDER: Comparator<Media> = compareBy(
+    { it.startDate?.year ?: it.seasonYear ?: Int.MAX_VALUE },
+    { it.startDate?.month ?: Int.MAX_VALUE },
+    { it.startDate?.day ?: Int.MAX_VALUE },
+    { it.id },
+)
 
 internal fun Media.seasonNeighbors(): List<Media> = relations.edges
     .asSequence()

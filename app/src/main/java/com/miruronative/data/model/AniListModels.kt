@@ -40,7 +40,11 @@ data class NextAiringEpisode(
 )
 
 @Serializable
-data class StudioNode(val name: String? = null, val isAnimationStudio: Boolean = false)
+data class StudioNode(
+    val id: Int = 0,
+    val name: String? = null,
+    val isAnimationStudio: Boolean = false,
+)
 
 @Serializable
 data class StudioConnection(val nodes: List<StudioNode> = emptyList())
@@ -84,13 +88,27 @@ data class Media(
     val endDate: FuzzyDate? = null,
     val trailer: Trailer? = null,
     val relations: MediaRelationConnection = MediaRelationConnection(),
-)
+) {
+    /**
+     * Backdrop for the wide hero banners, best landscape source first.
+     *
+     * AniList has no dedicated key art field, so this is a preference order over what it does
+     * carry. `bannerImage` is the only purpose-built one (1900x400). The trailer frame is 16:9 and
+     * therefore still crops sensibly across a hero; it is lower resolution than the cover, but a
+     * soft landscape still behind a heavy scrim reads far better than a portrait poster sliced
+     * down to a letterbox strip. The cover is the last resort.
+     */
+    val heroImage: String? get() =
+        bannerImage ?: trailer?.thumbnail ?: coverImage.extraLarge ?: coverImage.best
+}
 
 /** Filters supported by AniList's Media catalog query. */
 data class DiscoverFilters(
     val query: String = "",
     val genres: Set<String> = emptySet(),
     val tags: Set<String> = emptySet(),
+    val studioId: Int? = null,
+    val studioName: String? = null,
     val year: Int? = null,
     val status: String? = null,
     val format: String? = null,
@@ -98,7 +116,8 @@ data class DiscoverFilters(
     val sort: String = "TRENDING_DESC",
 ) {
     val activeCount: Int
-        get() = genres.size + tags.size + listOf(year, status, format, minimumScore).count { it != null }
+        get() = genres.size + tags.size +
+            listOf(studioId, year, status, format, minimumScore).count { it != null }
 }
 
 @Serializable
@@ -126,6 +145,15 @@ data class DiscoverOptionsData(
 
 @Serializable
 data class GqlDiscoverOptionsResponse(val data: DiscoverOptionsData? = null)
+
+@Serializable
+data class StudioPage(val studios: List<StudioNode> = emptyList())
+
+@Serializable
+data class StudioPageData(@SerialName("Page") val page: StudioPage? = null)
+
+@Serializable
+data class GqlStudioPageResponse(val data: StudioPageData? = null)
 
 // ---- Response envelopes ----
 @Serializable
@@ -164,7 +192,7 @@ data class HomeCollections(
 @Serializable
 data class HomeCollectionsData(
     val spotlight: Page? = null,
-    val newest: Page? = null,
+    val newest: SchedulePage? = null,
     val popular: Page? = null,
     val movies: Page? = null,
     val topRated: Page? = null,

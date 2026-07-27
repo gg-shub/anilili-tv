@@ -33,7 +33,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 object DiagnosticsLog {
     private const val LOG_DIR = "diagnostics"
     private const val LOG_FILE = "diagnostics.txt"
-    private const val SHARE_FILE = "anilili-diagnostics.txt"
+    private const val SHARE_FILE = "Anilili-diagnostics.txt"
     private const val MAX_BYTES = 900_000L
     private const val TRIM_TO_BYTES = 650_000
 
@@ -150,7 +150,11 @@ object DiagnosticsLog {
     }
 
     fun webViewPackage(label: String) {
-        val pkg = runCatching { WebView.getCurrentWebViewPackage() }.getOrNull()
+        val pkg = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            runCatching { WebView.getCurrentWebViewPackage() }.getOrNull()
+        } else {
+            null
+        }
         event(
             "$label webviewPackage=" +
                 if (pkg == null) "none" else "${pkg.packageName}/${pkg.versionName} (${pkg.longVersionCodeCompat()})",
@@ -221,7 +225,7 @@ object DiagnosticsLog {
 
     fun share(context: Context): Result<Unit> = runCatching {
         event("diagnostics share requested")
-        val snapshot = writeShareSnapshot(context.applicationContext)
+        val snapshot = createShareSnapshot(context.applicationContext)
         val uri = FileProvider.getUriForFile(
             context,
             "${context.packageName}.fileprovider",
@@ -239,15 +243,25 @@ object DiagnosticsLog {
         context.startActivity(chooser)
     }.onFailure { throwable("diagnostics share failed", it) }
 
+    // Writes happen on a dedicated thread: appends used to run synchronously on whatever thread
+    // logged (usually main), and on a memory-starved Fire TV a single flash write inside
+    // onTrimMemory blocked the main thread for 17+ seconds — during playback, at the worst
+    // possible moment. The single thread preserves log ordering.
+    private val writeExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "anilili-diagnostics-log").apply { isDaemon = true }
+    }
+
     private fun append(text: String) {
-        val target = file ?: appContext?.let {
-            File(it.filesDir, LOG_DIR).resolve(LOG_FILE).also { resolved -> file = resolved }
-        } ?: return
-        runCatching {
-            synchronized(lock) {
-                target.parentFile?.mkdirs()
-                trimIfNeeded(target)
-                target.appendText(text)
+        writeExecutor.execute {
+            val target = file ?: appContext?.let {
+                File(it.filesDir, LOG_DIR).resolve(LOG_FILE).also { resolved -> file = resolved }
+            } ?: return@execute
+            runCatching {
+                synchronized(lock) {
+                    target.parentFile?.mkdirs()
+                    trimIfNeeded(target)
+                    target.appendText(text)
+                }
             }
         }
     }
@@ -267,7 +281,37 @@ object DiagnosticsLog {
         )
     }
 
-    private fun writeShareSnapshot(context: Context): File {
+    /**
+     * TV path C: copies the snapshot into the device's public Downloads so it can also be pulled
+     * with a file manager or over USB. Timestamped so repeated shares don't shadow each other.
+     */
+    fun saveToDownloads(context: Context, snapshot: File): Result<String> = runCatching {
+        val name = "Anilili-diagnostics-" +
+            SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date()) + ".txt"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val resolver = context.contentResolver
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
+                put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+            }
+            val uri = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: error("Couldn't create a Downloads entry")
+            resolver.openOutputStream(uri)?.use { out ->
+                snapshot.inputStream().use { it.copyTo(out) }
+            } ?: error("Couldn't write to Downloads")
+        } else {
+            @Suppress("DEPRECATION")
+            val dir = android.os.Environment.getExternalStoragePublicDirectory(
+                android.os.Environment.DIRECTORY_DOWNLOADS,
+            )
+            dir.mkdirs()
+            snapshot.copyTo(File(dir, name), overwrite = true)
+        }
+        event("diagnostics saved to Downloads/$name")
+        "Downloads/$name"
+    }.onFailure { throwable("diagnostics downloads save failed", it) }
+
+    fun createShareSnapshot(context: Context): File {
         val dir = File(context.cacheDir, LOG_DIR).apply { mkdirs() }
         val snapshot = File(dir, SHARE_FILE)
         synchronized(lock) {
