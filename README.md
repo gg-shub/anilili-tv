@@ -26,8 +26,9 @@ Anilili TV is a native Android anime streaming client optimized specifically for
   <img src="showcase/details.png" width="49%" alt="Anime details and episode selection" />
   
   <img src="showcase/player2.png" width="49%" alt="Player controls" />
-  <img src="showcase/search.png" width="49%" alt="Anime search and browse" />
+<img src="showcase/player.png" width="49%" alt="Easily Skip intros" />
   
+  <img src="showcase/search.png" width="49%" alt="Anime search and browse" />
   <img src="showcase/library.png" width="49%" alt="Library with watchlist" />
 </div>
 
