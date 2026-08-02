@@ -1,0 +1,161 @@
+package com.shubh.anililitv.ui.settings
+
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import com.shubh.anililitv.data.settings.SettingsStore
+import com.shubh.anililitv.data.update.UpdateManager
+
+@Composable
+fun UpdatePromptHost() {
+    val context = LocalContext.current
+    val state by UpdateManager.state.collectAsState()
+
+    when (val s = state) {
+        is UpdateManager.State.Available -> AlertDialog(
+            shape = androidx.compose.ui.graphics.RectangleShape,
+            containerColor = androidx.compose.ui.graphics.Color(0xFF0F172A),
+            onDismissRequest = UpdateManager::dismiss,
+            title = { Text("Update available", fontWeight = FontWeight.Black) },
+            text = {
+                Column(
+                    Modifier
+                        .heightIn(max = 320.dp)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    Text(
+                        "Anilili v${s.update.version} (you have v${UpdateManager.currentVersion})",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    if (s.update.changelog.isNotBlank()) {
+                        Text(
+                            formatChangelog(s.update.changelog),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 10.dp),
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { UpdateManager.download(context) }) { Text("Update") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = {
+                        SettingsStore.setUpdateCheckOnLaunch(false)
+                        UpdateManager.dismiss()
+                    }) {
+                        Text("Don't remind me", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    TextButton(onClick = UpdateManager::dismiss, colors = androidx.compose.material3.ButtonDefaults.textButtonColors(contentColor = androidx.compose.ui.graphics.Color.White)) { Text("Not now") }
+                }
+            },
+        )
+
+        is UpdateManager.State.Downloading -> AlertDialog(
+            shape = androidx.compose.ui.graphics.RectangleShape,
+            containerColor = androidx.compose.ui.graphics.Color(0xFF0F172A),
+            onDismissRequest = {},
+            title = { Text("Downloading update", fontWeight = FontWeight.Black) },
+            text = {
+                Column {
+                    Text(
+                        "Anilili v${s.update.version}",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    LinearProgressIndicator(
+                        progress = { s.progress },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 14.dp),
+                    )
+                }
+            },
+            confirmButton = {},
+        )
+
+        is UpdateManager.State.ReadyToInstall -> AlertDialog(
+            shape = androidx.compose.ui.graphics.RectangleShape,
+            containerColor = androidx.compose.ui.graphics.Color(0xFF0F172A),
+            onDismissRequest = UpdateManager::dismiss,
+            title = { Text("Ready to install", fontWeight = FontWeight.Black) },
+            text = {
+                Text(
+                    "Anilili v${s.update.version} is downloaded. If nothing happened, allow installs " +
+                        "from this app when Android asks, then tap Install again.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { UpdateManager.install(context) }, colors = androidx.compose.material3.ButtonDefaults.textButtonColors(contentColor = androidx.compose.ui.graphics.Color.White)) { Text("Install") }
+            },
+            dismissButton = {
+                TextButton(onClick = UpdateManager::dismiss, colors = androidx.compose.material3.ButtonDefaults.textButtonColors(contentColor = androidx.compose.ui.graphics.Color.White)) { Text("Later") }
+            },
+        )
+
+        is UpdateManager.State.UpToDate -> AlertDialog(
+            shape = androidx.compose.ui.graphics.RectangleShape,
+            containerColor = androidx.compose.ui.graphics.Color(0xFF0F172A),
+            onDismissRequest = UpdateManager::dismiss,
+            title = { Text("No update available", fontWeight = FontWeight.Black) },
+            text = {
+                Text(
+                    if (s.latestPublishedVersion == UpdateManager.currentVersion) {
+                        "You're on the latest published version (v${UpdateManager.currentVersion})."
+                    } else {
+                        "You have v${UpdateManager.currentVersion}. The latest published release is " +
+                            "v${s.latestPublishedVersion}, so this installed build is already newer."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = UpdateManager::dismiss, colors = androidx.compose.material3.ButtonDefaults.textButtonColors(contentColor = androidx.compose.ui.graphics.Color.White)) { Text("OK") }
+            },
+        )
+
+        is UpdateManager.State.Failed -> AlertDialog(
+            shape = androidx.compose.ui.graphics.RectangleShape,
+            containerColor = androidx.compose.ui.graphics.Color(0xFF0F172A),
+            onDismissRequest = UpdateManager::dismiss,
+            title = { Text("Update failed", fontWeight = FontWeight.Black) },
+            text = { Text(s.message, style = MaterialTheme.typography.bodyMedium) },
+            confirmButton = {
+                TextButton(onClick = UpdateManager::dismiss, colors = androidx.compose.material3.ButtonDefaults.textButtonColors(contentColor = androidx.compose.ui.graphics.Color.White)) { Text("Close") }
+            },
+        )
+
+        else -> Unit
+    }
+}
+
+private fun formatChangelog(body: String): String =
+    body.lines()
+        .map { line ->
+            line
+                .replace(Regex("""^#+\s*"""), "")
+                .replace("**", "")
+                .replace("`", "")
+                .replace(Regex("""^\s*[-*]\s+"""), "• ")
+        }
+        .joinToString("\n")
+        .trim()
