@@ -32,6 +32,12 @@ Anilili TV is a native Android anime streaming client optimized specifically for
   <img src="showcase/library.png" width="49%" alt="Library with watchlist" />
 </div>
 
+## Community
+
+Have questions, want to report a bug, or suggest new features? Join my Discord Server!
+
+[![Join our Discord Server](https://img.shields.io/badge/Discord-Join_Server-7289DA?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/q5hMhWcxaX)
+
 ## Disclaimer
 
-> **Note:** This is a personal and educational project. This app is not affiliated with AniList, MyAnimeList, Miruro, AniKoto, ReAnime, AniZone, AnimeGG, AniNeko, or 2DHive. 
+> **Note:** This is a personal and educational project. This app is not affiliated with AniList, MyAnimeList, Miruro, AniKoto, ReAnime, AniZone, AnimeGG, AniNeko, or 2DHive.
