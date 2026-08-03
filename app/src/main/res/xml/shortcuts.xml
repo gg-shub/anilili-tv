@@ -9,7 +9,7 @@
         android:shortcutDisabledMessage="@string/diagnostics_shortcut_disabled">
         <intent
             android:action="android.intent.action.VIEW"
-            android:targetPackage="com.miruronative"
-            android:targetClass="com.miruronative.diagnostics.ShareDiagnosticsActivity" />
+            android:targetPackage="com.shubh.anililitv"
+            android:targetClass="com.shubh.anililitv.diagnostics.ShareDiagnosticsActivity" />
     </shortcut>
 </shortcuts>
