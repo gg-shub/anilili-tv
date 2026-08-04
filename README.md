@@ -3,9 +3,13 @@
   <p>A native anime streaming client for the big screen.</p>
 
   <p>
-    <a href="#"><img src="https://img.shields.io/badge/Platform-Android%20TV-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android TV" /></a>
+    <!-- Top row (Bigger) -->
+    <img src="https://img.shields.io/badge/Platform-Android%20TV-3DDC84?style=for-the-badge&logo=android&logoColor=white" height="36" alt="Android TV" />
+    <br><br>
+    <!-- Bottom row (Slightly smaller than top) -->
+    <img src="https://img.shields.io/badge/Android-5.1%2B-3DDC84?style=for-the-badge&logo=android&logoColor=white" height="26" alt="Android 5.1+" />
+    <a href="https://github.com/gg-shub/anilili-tv/releases/download/release/Anilili.apk"><img src="https://img.shields.io/badge/Download-Latest_APK-2196F3?style=for-the-badge&logo=android&logoColor=white" height="26" alt="Download APK" /></a>
   </p>
-
 </div>
 
 ## About
@@ -26,7 +30,7 @@ Anilili TV is a native Android anime streaming client optimized specifically for
   <img src="showcase/details.png" width="49%" alt="Anime details and episode selection" />
   
   <img src="showcase/player2.png" width="49%" alt="Player controls" />
-<img src="showcase/player.png" width="49%" alt="Easily Skip intros" />
+  <img src="showcase/player.png" width="49%" alt="Easily Skip intros" />
   
   <img src="showcase/search.png" width="49%" alt="Anime search and browse" />
   <img src="showcase/library.png" width="49%" alt="Library with watchlist" />
@@ -36,7 +40,7 @@ Anilili TV is a native Android anime streaming client optimized specifically for
 
 Have questions, want to report a bug, or suggest new features? Join my Discord Server!
 
-[![Join our Discord Server](https://img.shields.io/badge/Discord-Join_Server-7289DA?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/q5hMhWcxaX)
+<a href="https://discord.gg/q5hMhWcxaX"><img src="https://img.shields.io/badge/Discord-Join_Server-7289DA?style=for-the-badge&logo=discord&logoColor=white" alt="Join our Discord Server" /></a>
 
 ## Disclaimer
 
