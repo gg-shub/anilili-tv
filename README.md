@@ -3,10 +3,10 @@
   <p>A native anime streaming client for the big screen.</p>
 
   <p>
-    <!-- Top row (Bigger) -->
+    <!-- Top row  -->
     <img src="https://img.shields.io/badge/Platform-Android%20TV-3DDC84?style=for-the-badge&logo=android&logoColor=white" height="36" alt="Android TV" />
     <br><br>
-    <!-- Bottom row (Slightly smaller than top) -->
+    <!-- Bottom row -->
     <img src="https://img.shields.io/badge/Android-5.1%2B-3DDC84?style=for-the-badge&logo=android&logoColor=white" height="26" alt="Android 5.1+" />
     <a href="https://github.com/gg-shub/anilili-tv/releases/download/release/Anilili.apk"><img src="https://img.shields.io/badge/Download-Latest_APK-2196F3?style=for-the-badge&logo=android&logoColor=white" height="26" alt="Download APK" /></a>
   </p>
