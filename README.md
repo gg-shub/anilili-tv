@@ -40,7 +40,7 @@ Anilili TV is a native Android anime streaming client optimized specifically for
 
 Have questions, want to report a bug, or suggest new features? Join my Discord Server!
 
-<a href="https://discord.gg/q5hMhWcxaX"><img src="https://img.shields.io/badge/Discord-Join_Server-7289DA?style=for-the-badge&logo=discord&logoColor=white" alt="Join our Discord Server" /></a>
+<a href="https://discord.gg/Mtq4aV2f2p"><img src="https://img.shields.io/badge/Discord-Join_Server-7289DA?style=for-the-badge&logo=discord&logoColor=white" alt="Join our Discord Server" /></a>
 
 ## Disclaimer
 
